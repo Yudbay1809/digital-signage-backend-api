@@ -28,7 +28,7 @@ class SignageApp extends StatelessWidget {
       brightness: Brightness.light,
     );
     return MaterialApp(
-      title: 'Android Signage Player',
+      title: 'Digital Signage Backend API',
       theme: ThemeData(
         useMaterial3: true,
         colorScheme: colorScheme,

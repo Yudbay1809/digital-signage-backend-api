@@ -7,7 +7,7 @@
     <uses-feature android:name="android.hardware.touchscreen" android:required="false"/>
 
     <application
-        android:label="signage_android_player"
+        android:label="Digital Signage Backend API"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
         android:banner="@mipmap/ic_launcher"
@@ -54,3 +54,4 @@
         </intent>
     </queries>
 </manifest>
+

@@ -5,10 +5,11 @@
 // 'flutter create' template.
 
 // The application's name. By default this is also the title of the Flutter window.
-PRODUCT_NAME = signage_android_player
+PRODUCT_NAME = Digital Signage Backend API
 
 // The application's bundle identifier
-PRODUCT_BUNDLE_IDENTIFIER = com.example.signageAndroidPlayer
+PRODUCT_BUNDLE_IDENTIFIER = com.yudbay1809.digitalsignagebackendapi
 
 // The copyright displayed in application information
-PRODUCT_COPYRIGHT = Copyright © 2026 com.example. All rights reserved.
+PRODUCT_COPYRIGHT = Copyright © 2026 Yudbay1809. All rights reserved.
+

@@ -89,13 +89,13 @@ BEGIN
     BEGIN
         BLOCK "040904e4"
         BEGIN
-            VALUE "CompanyName", "com.example" "\0"
-            VALUE "FileDescription", "signage_android_player" "\0"
+            VALUE "CompanyName", "Yudbay1809" "\0"
+            VALUE "FileDescription", "Digital Signage Backend API" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
-            VALUE "InternalName", "signage_android_player" "\0"
-            VALUE "LegalCopyright", "Copyright (C) 2026 com.example. All rights reserved." "\0"
-            VALUE "OriginalFilename", "signage_android_player.exe" "\0"
-            VALUE "ProductName", "signage_android_player" "\0"
+            VALUE "InternalName", "digital_signage_backend_api" "\0"
+            VALUE "LegalCopyright", "Copyright (C) 2026 Yudbay1809. All rights reserved." "\0"
+            VALUE "OriginalFilename", "digital_signage_backend_api.exe" "\0"
+            VALUE "ProductName", "Digital Signage Backend API" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"
         END
     END
@@ -119,3 +119,4 @@ END
 
 /////////////////////////////////////////////////////////////////////////////
 #endif    // not APSTUDIO_INVOKED
+

@@ -1,4 +1,4 @@
-package com.example.signage_android_player
+package com.yudbay1809.digitalsignagebackendapi
 
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -13,3 +13,4 @@ class BootReceiver : BroadcastReceiver() {
         }
     }
 }
+

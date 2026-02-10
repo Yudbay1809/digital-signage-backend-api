@@ -6,7 +6,7 @@ plugins {
 }
 
 android {
-    namespace = "com.example.signage_android_player"
+    namespace = "com.yudbay1809.digitalsignagebackendapi"
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
 
@@ -21,7 +21,7 @@ android {
 
     defaultConfig {
         // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
-        applicationId = "com.example.signage_android_player"
+        applicationId = "com.yudbay1809.digitalsignagebackendapi"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = flutter.minSdkVersion
@@ -42,3 +42,4 @@ android {
 flutter {
     source = "../.."
 }
+

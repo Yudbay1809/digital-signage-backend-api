@@ -1,11 +1,11 @@
 {
-    "name": "signage_android_player",
-    "short_name": "signage_android_player",
+    "name": "Digital Signage Backend API",
+    "short_name": "Digital Signage",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#0175C2",
     "theme_color": "#0175C2",
-    "description": "A new Flutter project.",
+    "description": "Flutter-based digital signage playback application.",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [
@@ -33,3 +33,4 @@
         }
     ]
 }
+

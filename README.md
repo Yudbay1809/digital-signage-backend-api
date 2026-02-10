@@ -1,4 +1,4 @@
-# Signage Android Player
+# Digital Signage Backend API
 
 [![Flutter CI](https://github.com/Yudbay1809/digital-signage-backend-api/actions/workflows/flutter-ci.yml/badge.svg)](https://github.com/Yudbay1809/digital-signage-backend-api/actions/workflows/flutter-ci.yml)
 ![Platform](https://img.shields.io/badge/platform-Android-success)
