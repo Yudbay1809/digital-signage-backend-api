@@ -1,11 +1,11 @@
-# Digital Signage Backend API
+# Digital Signage Player App
 
 [![Flutter CI](https://github.com/Yudbay1809/digital-signage-backend-api/actions/workflows/flutter-ci.yml/badge.svg)](https://github.com/Yudbay1809/digital-signage-backend-api/actions/workflows/flutter-ci.yml)
 ![Platform](https://img.shields.io/badge/platform-Android-success)
 ![Flutter](https://img.shields.io/badge/Flutter-3.38.x-blue)
 ![License](https://img.shields.io/badge/license-MIT-informational)
 
-Android digital signage player built with Flutter.  
+Flutter-based digital signage player application.  
 This app is designed for unattended screens with playlist sync, local caching, and full-screen playback.
 
 ## Highlights
