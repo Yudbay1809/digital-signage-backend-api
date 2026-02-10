@@ -1,16 +1,82 @@
-# signage_android_player
+# Signage Android Player
 
-A new Flutter project.
+[![Flutter CI](https://github.com/Yudbay1809/signage_android_player/actions/workflows/flutter-ci.yml/badge.svg)](https://github.com/Yudbay1809/signage_android_player/actions/workflows/flutter-ci.yml)
+![Platform](https://img.shields.io/badge/platform-Android-success)
+![Flutter](https://img.shields.io/badge/Flutter-3.38.x-blue)
+![License](https://img.shields.io/badge/license-MIT-informational)
+
+Android digital signage player built with Flutter.  
+This app is designed for unattended screens with playlist sync, local caching, and full-screen playback.
+
+## Highlights
+
+- Device registration flow with server base URL configuration
+- Playlist sync and local media caching
+- Realtime updates via websocket channel with fallback polling
+- Full-screen immersive playback mode
+- Keep-awake behavior for always-on display usage
+
+## Tech Stack
+
+- Flutter / Dart
+- `video_player`
+- `http`
+- `shared_preferences`
+- `path_provider`
+- `wakelock_plus`
+
+## Project Structure
+
+```text
+lib/
+  main.dart                 # App entry + orchestration
+  models/                   # Data models (device config, playback items)
+  services/                 # API, sync, cache services
+  player/                   # Playlist playback implementation
+test/
+  widget_test.dart
+```
 
 ## Getting Started
 
-This project is a starting point for a Flutter application.
+### Prerequisites
 
-A few resources to get you started if this is your first Flutter project:
+- Flutter `3.38.x` (stable channel)
+- Dart `3.10.x`
+- Android SDK (for Android build target)
 
-- [Lab: Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Cookbook: Useful Flutter samples](https://docs.flutter.dev/cookbook)
+### Run Locally
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+```bash
+flutter pub get
+flutter run
+```
+
+### Run Quality Checks
+
+```bash
+flutter analyze
+flutter test
+```
+
+## CI
+
+GitHub Actions workflow runs:
+
+- `flutter pub get`
+- `flutter analyze`
+- `flutter test`
+
+See: `.github/workflows/flutter-ci.yml`
+
+## Security
+
+If you discover a security issue, please follow the reporting process in `SECURITY.md`.
+
+## Contributing
+
+Contributions are welcome. Please read `CONTRIBUTING.md` before opening a Pull Request.
+
+## License
+
+This project is licensed under the MIT License. See `LICENSE`.
