@@ -1,6 +1,6 @@
 # Signage Android Player
 
-[![Flutter CI](https://github.com/Yudbay1809/signage_android_player/actions/workflows/flutter-ci.yml/badge.svg)](https://github.com/Yudbay1809/signage_android_player/actions/workflows/flutter-ci.yml)
+[![Flutter CI](https://github.com/Yudbay1809/digital-signage-backend-api/actions/workflows/flutter-ci.yml/badge.svg)](https://github.com/Yudbay1809/digital-signage-backend-api/actions/workflows/flutter-ci.yml)
 ![Platform](https://img.shields.io/badge/platform-Android-success)
 ![Flutter](https://img.shields.io/badge/Flutter-3.38.x-blue)
 ![License](https://img.shields.io/badge/license-MIT-informational)
