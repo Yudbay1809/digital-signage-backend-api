@@ -7,8 +7,14 @@ import '../models/playback_item.dart';
 class PlaylistPlayer extends StatefulWidget {
   final List<PlaybackItem> items;
   final String syncKey;
+  final int transitionDurationSec;
 
-  const PlaylistPlayer({super.key, required this.items, required this.syncKey});
+  const PlaylistPlayer({
+    super.key,
+    required this.items,
+    required this.syncKey,
+    this.transitionDurationSec = 1,
+  });
 
   @override
   State<PlaylistPlayer> createState() => _PlaylistPlayerState();
@@ -188,10 +194,13 @@ class _PlaylistPlayerState extends State<PlaylistPlayer> {
         child: CircularProgressIndicator(color: Colors.white),
       );
     } else if (item.type == 'image') {
-      content = Center(
-        child: item.localPath != null
-            ? Image.file(File(item.localPath!), fit: BoxFit.contain)
-            : Image.network(item.url, fit: BoxFit.contain),
+      content = SizedBox.expand(
+        child: FittedBox(
+          fit: BoxFit.contain,
+          child: item.localPath != null
+              ? Image.file(File(item.localPath!))
+              : Image.network(item.url),
+        ),
       );
     } else {
       content = Center(
@@ -199,6 +208,27 @@ class _PlaylistPlayerState extends State<PlaylistPlayer> {
       );
     }
 
-    return SizedBox.expand(child: content);
+    final transitionMillis = widget.transitionDurationSec.clamp(0, 30) * 1000;
+    if (transitionMillis <= 0) {
+      return SizedBox.expand(
+        child: KeyedSubtree(
+          key: ValueKey('$_index-${item.id}'),
+          child: content,
+        ),
+      );
+    }
+
+    return SizedBox.expand(
+      child: AnimatedSwitcher(
+        duration: Duration(milliseconds: transitionMillis),
+        switchInCurve: Curves.easeInOut,
+        switchOutCurve: Curves.easeInOut,
+        transitionBuilder: (child, animation) => FadeTransition(opacity: animation, child: child),
+        child: KeyedSubtree(
+          key: ValueKey('$_index-${item.id}'),
+          child: content,
+        ),
+      ),
+    );
   }
 }

@@ -17,14 +17,20 @@ class ApiService {
   Uri _uri(String path, [Map<String, String>? queryParameters]) {
     final uri = Uri.parse(baseUrl).resolve(path);
     if (queryParameters == null || queryParameters.isEmpty) return uri;
-    return uri.replace(queryParameters: {...uri.queryParameters, ...queryParameters});
+    return uri.replace(
+      queryParameters: {...uri.queryParameters, ...queryParameters},
+    );
   }
 
   bool _isTransientError(Object error) {
-    return error is TimeoutException || error is SocketException || error is HttpException;
+    return error is TimeoutException ||
+        error is SocketException ||
+        error is HttpException;
   }
 
-  Future<http.Response> _sendWithRetry(Future<http.Response> Function() call) async {
+  Future<http.Response> _sendWithRetry(
+    Future<http.Response> Function() call,
+  ) async {
     Object? lastError;
     for (var attempt = 0; attempt <= _retryDelays.length; attempt++) {
       try {
@@ -50,14 +56,13 @@ class ApiService {
     required String location,
     String? orientation,
   }) async {
-    final query = <String, String>{
-      'name': name,
-      'location': location,
-    };
+    final query = <String, String>{'name': name, 'location': location};
     if (orientation != null && orientation.isNotEmpty) {
       query['orientation'] = orientation;
     }
-    final res = await _sendWithRetry(() => http.post(_uri('/devices/register', query)));
+    final res = await _sendWithRetry(
+      () => http.post(_uri('/devices/register', query)),
+    );
     if (res.statusCode != 200) {
       throw Exception('Register failed: ${res.statusCode} ${res.body}');
     }
@@ -65,7 +70,9 @@ class ApiService {
   }
 
   Future<DeviceConfig> fetchConfig(String deviceId) async {
-    final res = await _sendWithRetry(() => http.get(_uri('/devices/$deviceId/config')));
+    final res = await _sendWithRetry(
+      () => http.get(_uri('/devices/$deviceId/config')),
+    );
     if (res.statusCode != 200) {
       throw Exception('Fetch config failed: ${res.statusCode}');
     }
@@ -94,6 +101,10 @@ class ApiService {
         id: p['id'],
         name: (p['name'] ?? '').toString(),
         screenId: p['screen_id'],
+        isFlashSale: p['is_flash_sale'] == true,
+        flashNote: p['flash_note']?.toString(),
+        flashCountdownSec: (p['flash_countdown_sec'] as num?)?.toInt(),
+        flashItemsJson: p['flash_items_json']?.toString(),
         items: items,
       );
     }).toList();
@@ -105,6 +116,8 @@ class ApiService {
           startTime: sc['start_time'],
           endTime: sc['end_time'],
           playlistId: sc['playlist_id'],
+          note: sc['note']?.toString(),
+          countdownSec: (sc['countdown_sec'] as num?)?.toInt(),
         );
       }).toList();
 
@@ -113,16 +126,46 @@ class ApiService {
         name: s['name'],
         activePlaylistId: s['active_playlist_id']?.toString(),
         gridPreset: (s['grid_preset'] ?? '1x1').toString(),
+        transitionDurationSec: (s['transition_duration_sec'] as num?)?.toInt(),
         schedules: schedules,
       );
     }).toList();
 
-    final orientation = data['device'] != null ? data['device']['orientation'] as String? : null;
-    return DeviceConfig(deviceId: data['device_id'], media: media, playlists: playlists, screens: screens, orientation: orientation);
+    final orientation = data['device'] != null
+        ? data['device']['orientation'] as String?
+        : null;
+    final flashSaleRaw = data['flash_sale'];
+    final flashSale = (flashSaleRaw is Map)
+        ? FlashSaleConfig(
+            enabled: flashSaleRaw['enabled'] == true,
+            active: flashSaleRaw['active'] == true,
+            note: flashSaleRaw['note']?.toString(),
+            countdownSec: (flashSaleRaw['countdown_sec'] as num?)?.toInt(),
+            productsJson: flashSaleRaw['products_json']?.toString(),
+            scheduleDays: flashSaleRaw['schedule_days']?.toString(),
+            scheduleStartTime: flashSaleRaw['schedule_start_time']?.toString(),
+            scheduleEndTime: flashSaleRaw['schedule_end_time']?.toString(),
+            runtimeStartAt: flashSaleRaw['runtime_start_at']?.toString(),
+            runtimeEndAt: flashSaleRaw['runtime_end_at']?.toString(),
+            countdownEndAt: flashSaleRaw['countdown_end_at']?.toString(),
+            activatedAt: flashSaleRaw['activated_at']?.toString(),
+            updatedAt: flashSaleRaw['updated_at']?.toString(),
+          )
+        : null;
+    return DeviceConfig(
+      deviceId: data['device_id'],
+      media: media,
+      playlists: playlists,
+      screens: screens,
+      flashSale: flashSale,
+      orientation: orientation,
+    );
   }
 
   Future<void> heartbeat(String deviceId) async {
-    final res = await _sendWithRetry(() => http.post(_uri('/devices/$deviceId/heartbeat')));
+    final res = await _sendWithRetry(
+      () => http.post(_uri('/devices/$deviceId/heartbeat')),
+    );
     if (res.statusCode != 200) {
       throw Exception('Heartbeat failed: ${res.statusCode}');
     }
@@ -132,7 +175,9 @@ class ApiService {
     required String deviceId,
     required String orientation,
   }) async {
-    final res = await _sendWithRetry(() => http.put(_uri('/devices/$deviceId', {'orientation': orientation})));
+    final res = await _sendWithRetry(
+      () => http.put(_uri('/devices/$deviceId', {'orientation': orientation})),
+    );
     if (res.statusCode != 200) {
       throw Exception('Update orientation failed: ${res.statusCode}');
     }

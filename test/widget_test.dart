@@ -7,7 +7,7 @@
 
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:digital_signage_backend_api/main.dart';
+import 'package:signage_android_player/main.dart';
 
 void main() {
   testWidgets('App boots', (WidgetTester tester) async {
