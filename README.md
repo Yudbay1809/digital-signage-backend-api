@@ -15,6 +15,9 @@ This app is designed for unattended screens with playlist sync, local caching, a
 - Realtime updates via websocket channel with fallback polling
 - Full-screen immersive playback mode
 - Keep-awake behavior for always-on display usage
+- Device-level Flash Sale overlay campaign (independent from playlist)
+- Flash Sale product cards driven by campaign `products_json` + `media_id`
+- Flash Sale countdown/note sourced from campaign runtime in device config
 
 ## Tech Stack
 
@@ -68,6 +71,14 @@ GitHub Actions workflow runs:
 - `flutter test`
 
 See: `.github/workflows/flutter-ci.yml`
+
+## Flash Sale Runtime
+- Player reads `flash_sale` from `GET /devices/{device_id}/config`.
+- Overlay activates when campaign `active=true`.
+- Supports:
+  - running text from `note`
+  - countdown from `countdown_sec`/`countdown_end_at`
+  - product cards from `products_json` with media preview fallback
 
 ## Security
 
