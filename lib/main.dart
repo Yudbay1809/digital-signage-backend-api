@@ -628,6 +628,18 @@ class _PlayerPageState extends State<PlayerPage> {
                         child: const Text('Auto Detect Server'),
                       ),
                     ),
+                    const SizedBox(height: 8),
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: Text(
+                        'Credits: Yudbay1809',
+                        style: GoogleFonts.poppins(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                          color: const Color(0xFF475569),
+                        ),
+                      ),
+                    ),
                   ],
                 ),
               ),

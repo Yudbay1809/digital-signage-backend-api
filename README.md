@@ -80,6 +80,9 @@ See: `.github/workflows/flutter-ci.yml`
   - countdown from `countdown_sec`/`countdown_end_at`
   - product cards from `products_json` with media preview fallback
 
+## Maintainer
+- Yudbay1809
+
 ## Security
 
 If you discover a security issue, please follow the reporting process in `SECURITY.md`.
