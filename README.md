@@ -18,6 +18,9 @@ This app is designed for unattended screens with playlist sync, local caching, a
 - Device-level Flash Sale overlay campaign (independent from playlist)
 - Flash Sale product cards driven by campaign `products_json` + `media_id`
 - Flash Sale countdown/note sourced from campaign runtime in device config
+- Smooth auto-scrolling Flash Sale cards when product count is more than 5
+- Smooth running text banner optimized for TV playback
+- Countdown parser hardened for UTC/naive timestamp variants from backend
 
 ## Tech Stack
 
@@ -79,6 +82,14 @@ See: `.github/workflows/flutter-ci.yml`
   - running text from `note`
   - countdown from `countdown_sec`/`countdown_end_at`
   - product cards from `products_json` with media preview fallback
+
+## Build Release APK
+```bash
+flutter build apk --release
+```
+
+Output:
+- `build/app/outputs/flutter-apk/app-release.apk`
 
 ## Maintainer
 - Yudbay1809
