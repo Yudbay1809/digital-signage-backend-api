@@ -86,8 +86,6 @@ class PlayerPage extends StatefulWidget {
 }
 
 class _PlayerPageState extends State<PlayerPage> {
-  static const double _flashSaleOverlayReservedTop = 220;
-  static const double _flashSaleOverlayReservedBottom = 94;
   static const String _defaultServerBaseUrl = '';
   final Duration _heartbeatInterval = const Duration(seconds: 30);
   final Duration _configPollInterval = const Duration(seconds: 8);
@@ -816,7 +814,7 @@ class _PlayerPageState extends State<PlayerPage> {
 
   void _startFlashOverlayTicker() {
     _flashOverlayTimer?.cancel();
-    _flashOverlayTimer = Timer.periodic(const Duration(milliseconds: 250), (_) {
+    _flashOverlayTimer = Timer.periodic(const Duration(milliseconds: 33), (_) {
       if (!mounted || !_flashSaleActiveA) return;
       setState(() {});
     });
@@ -913,9 +911,7 @@ class _PlayerPageState extends State<PlayerPage> {
     final campaignActive = flashCampaign?.active == true;
     final campaignStart = _tryParseIsoDateTime(flashCampaign?.runtimeStartAt);
     final campaignEnd = _tryParseIsoDateTime(flashCampaign?.runtimeEndAt);
-    final campaignCountdownEnd = _tryParseIsoDateTime(
-      flashCampaign?.countdownEndAt,
-    );
+    final campaignCountdownEnd = _resolveCampaignCountdownEnd(flashCampaign);
     final campaignNote = (flashCampaign?.note ?? '').trim();
     final campaignProductsJson = (flashCampaign?.productsJson ?? '').trim();
 
@@ -964,9 +960,18 @@ class _PlayerPageState extends State<PlayerPage> {
     final isFlashSale = campaignActive || fallbackFlashByPlaylist;
     final flashStart = campaignActive ? campaignStart : selectionA.startTime;
     final flashEnd = campaignActive ? campaignEnd : selectionA.endTime;
-    final flashCountdownEnd = campaignActive
+    var flashCountdownEnd = campaignActive
         ? campaignCountdownEnd
         : selectionA.countdownEndTime;
+    if (campaignActive &&
+        (flashCampaign?.countdownSec ?? 0) > 0 &&
+        (flashCountdownEnd == null ||
+            !flashCountdownEnd.isAfter(DateTime.now())) &&
+        !_flashSaleActiveA) {
+      flashCountdownEnd = DateTime.now().add(
+        Duration(seconds: flashCampaign!.countdownSec!),
+      );
+    }
     final flashNote = campaignActive ? campaignNote : (selectionA.note ?? '');
     final flashProductsJson = campaignActive
         ? campaignProductsJson
@@ -1354,7 +1359,89 @@ class _PlayerPageState extends State<PlayerPage> {
   DateTime? _tryParseIsoDateTime(String? raw) {
     final value = (raw ?? '').trim();
     if (value.isEmpty) return null;
-    return DateTime.tryParse(value)?.toLocal();
+    final parsed = DateTime.tryParse(value);
+    if (parsed == null) return null;
+    final hasTimezone = RegExp(r'(Z|[+-]\d{2}:\d{2})$').hasMatch(value);
+    if (hasTimezone || parsed.isUtc) {
+      return parsed.toLocal();
+    }
+    // Backend currently emits naive UTC timestamps; normalize to local time.
+    return DateTime.utc(
+      parsed.year,
+      parsed.month,
+      parsed.day,
+      parsed.hour,
+      parsed.minute,
+      parsed.second,
+      parsed.millisecond,
+      parsed.microsecond,
+    ).toLocal();
+  }
+
+  List<DateTime> _isoCandidatesToLocal(String? raw) {
+    final value = (raw ?? '').trim();
+    if (value.isEmpty) return const [];
+    final parsed = DateTime.tryParse(value);
+    if (parsed == null) return const [];
+    final hasTimezone = RegExp(r'(Z|[+-]\d{2}:\d{2})$').hasMatch(value);
+    if (hasTimezone || parsed.isUtc) {
+      return [parsed.toLocal()];
+    }
+    final localAssumed = parsed;
+    final utcAssumed = DateTime.utc(
+      parsed.year,
+      parsed.month,
+      parsed.day,
+      parsed.hour,
+      parsed.minute,
+      parsed.second,
+      parsed.millisecond,
+      parsed.microsecond,
+    ).toLocal();
+    return [localAssumed, utcAssumed];
+  }
+
+  DateTime? _resolveCampaignCountdownEnd(FlashSaleConfig? campaign) {
+    if (campaign == null) return null;
+    final now = DateTime.now();
+    final directCandidates = _isoCandidatesToLocal(campaign.countdownEndAt);
+    DateTime? earliestFuture;
+    DateTime? latestPast;
+    for (final end in directCandidates) {
+      if (end.isAfter(now)) {
+        if (earliestFuture == null || end.isBefore(earliestFuture)) {
+          earliestFuture = end;
+        }
+      } else if (latestPast == null || end.isAfter(latestPast)) {
+        latestPast = end;
+      }
+    }
+    if (earliestFuture != null) return earliestFuture;
+
+    final sec = campaign.countdownSec ?? 0;
+    if (sec <= 0) {
+      return latestPast;
+    }
+
+    final starts = <DateTime>[
+      ..._isoCandidatesToLocal(campaign.runtimeStartAt),
+      ..._isoCandidatesToLocal(campaign.activatedAt),
+    ];
+    if (starts.isEmpty) return latestPast;
+
+    DateTime? bestFutureEnd;
+    DateTime? bestPastEnd;
+    for (final start in starts) {
+      final end = start.add(Duration(seconds: sec));
+      if (end.isAfter(now)) {
+        if (bestFutureEnd == null || end.isBefore(bestFutureEnd)) {
+          bestFutureEnd = end;
+        }
+      } else if (bestPastEnd == null || end.isAfter(bestPastEnd)) {
+        bestPastEnd = end;
+      }
+    }
+    return bestFutureEnd ?? latestPast ?? bestPastEnd;
   }
 
   int _gridRows(String preset) {
@@ -1391,6 +1478,27 @@ class _PlayerPageState extends State<PlayerPage> {
     final cols = _gridCols(_gridPresetA).clamp(1, 4);
     final cellCount = rows * cols;
     if (cellCount <= 1) {
+      if (_itemsA.isEmpty) {
+        if (_flashSaleActiveA) {
+          return const DecoratedBox(
+            decoration: BoxDecoration(color: Colors.black),
+            child: SizedBox.expand(),
+          );
+        }
+        return const DecoratedBox(
+          decoration: BoxDecoration(color: Colors.black),
+          child: Center(
+            child: Text(
+              'Belum ada konten playlist',
+              style: TextStyle(
+                color: Color(0xFFCBD5E1),
+                fontSize: 16,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+        );
+      }
       return PlaylistPlayer(
         items: _itemsA,
         syncKey: _syncKeyA,
@@ -1450,6 +1558,58 @@ class _PlayerPageState extends State<PlayerPage> {
     return value.contains('flash sale') ||
         value.contains('flashsale') ||
         value.contains('promo');
+  }
+
+  _FlashSaleLayoutProfile _flashSaleLayoutProfileForSize(Size size) {
+    final h = size.height;
+    final w = size.width;
+    final tvLikeLandscape = (w / h) >= 1.6;
+    if (tvLikeLandscape && w <= 1366 && h <= 800) {
+      return const _FlashSaleLayoutProfile(
+        reservedTop: 272,
+        reservedBottom: 94,
+        headerTop: 8,
+        cardsTop: 108,
+        cardsBottom: 102,
+        cardHeight: 250,
+        infoCardWidth: 268,
+        productCardWidth: 244,
+      );
+    }
+    if (h <= 760 || w <= 1280) {
+      return const _FlashSaleLayoutProfile(
+        reservedTop: 286,
+        reservedBottom: 98,
+        headerTop: 8,
+        cardsTop: 118,
+        cardsBottom: 110,
+        cardHeight: 228,
+        infoCardWidth: 256,
+        productCardWidth: 236,
+      );
+    }
+    if (h <= 1180 || w <= 1920) {
+      return const _FlashSaleLayoutProfile(
+        reservedTop: 324,
+        reservedBottom: 100,
+        headerTop: 10,
+        cardsTop: 126,
+        cardsBottom: 112,
+        cardHeight: 260,
+        infoCardWidth: 292,
+        productCardWidth: 278,
+      );
+    }
+    return const _FlashSaleLayoutProfile(
+      reservedTop: 350,
+      reservedBottom: 104,
+      headerTop: 12,
+      cardsTop: 136,
+      cardsBottom: 114,
+      cardHeight: 292,
+      infoCardWidth: 320,
+      productCardWidth: 302,
+    );
   }
 
   String _flashSaleCountdownLabel() {
@@ -1535,6 +1695,8 @@ class _PlayerPageState extends State<PlayerPage> {
 
   Widget _buildFlashSaleOverlay() {
     if (!_flashSaleActiveA) return const SizedBox.shrink();
+    final size = MediaQuery.sizeOf(context);
+    final layout = _flashSaleLayoutProfileForSize(size);
     final countdown = _flashSaleCountdownLabel();
     final note = _flashSaleNoteA.trim().isNotEmpty
         ? _flashSaleNoteA.trim()
@@ -1605,21 +1767,51 @@ class _PlayerPageState extends State<PlayerPage> {
             ),
           ];
     const maxVisibleProducts = 5;
-    final rotateEnabled = products.length > maxVisibleProducts;
-    final rotationStep = rotateEnabled
-        ? (now.millisecondsSinceEpoch ~/ 9000) % products.length
-        : 0;
-    final displayProducts = rotateEnabled
-        ? List<_BeautyProduct>.generate(
-            maxVisibleProducts,
-            (i) => products[(i + rotationStep) % products.length],
-          )
+    final autoScrollEnabled = products.length > maxVisibleProducts;
+    final isTvLandscape = (size.width / size.height) >= 1.6 && size.width >= 1180;
+    final horizontalListPadding = isTvLandscape ? 6.0 : 8.0;
+    final cardGap = isTvLandscape ? 10.0 : 12.0;
+    final cardsRegionHeight =
+        size.height - layout.cardsTop - layout.cardsBottom - 14;
+    final targetCardHeight = isTvLandscape
+        ? cardsRegionHeight * 0.94
+        : cardsRegionHeight * 0.88;
+    final cardHeight = targetCardHeight
+        .clamp(layout.cardHeight, layout.cardHeight + 240)
+        .toDouble();
+    final visibleCount = math.max(
+      1,
+      math.min(
+        autoScrollEnabled ? maxVisibleProducts : products.length,
+        maxVisibleProducts,
+      ),
+    );
+    final availableRowWidth =
+        size.width - 24 - 20 - (horizontalListPadding * 2);
+    final rowWidthAfterGap = availableRowWidth - ((visibleCount - 1) * cardGap);
+    final dynamicCardWidth = (rowWidthAfterGap / visibleCount)
+        .clamp(layout.productCardWidth, layout.productCardWidth + 170)
+        .toDouble();
+    final baseLoopWidth =
+        (products.length * dynamicCardWidth) +
+        ((products.length - 1) * cardGap);
+    final pxPerSecond = dynamicCardWidth / 3.2;
+    final elapsedSec = now.millisecondsSinceEpoch / 1000.0;
+    final smoothOffset = autoScrollEnabled
+        ? ((elapsedSec * pxPerSecond) % (baseLoopWidth + cardGap))
+        : 0.0;
+    final renderProducts = autoScrollEnabled
+        ? <_BeautyProduct>[...products, ...products]
         : products;
     final pulse = 0.94 + (math.sin(now.millisecondsSinceEpoch / 380) * 0.06);
     final shimmer = (now.millisecondsSinceEpoch % 2800) / 2800.0;
 
     String marqueeText(String src) {
-      return '💄 🎀 ✨ 🛍️  $src  🔥 Diskon hingga 50%! Gratis gift untuk pembelian di atas Rp 150.000! Stok terbatas! ✨';
+      final cleaned = src.trim();
+      if (cleaned.isEmpty) {
+        return 'Atur Note Flash Sale di CMS Desktop';
+      }
+      return cleaned;
     }
 
     return IgnorePointer(
@@ -1633,9 +1825,9 @@ class _PlayerPageState extends State<PlayerPage> {
                     begin: Alignment.topCenter,
                     end: Alignment.bottomCenter,
                     colors: [
-                      Color(0x40126663),
-                      Color(0x3523B4A7),
-                      Color(0x201E7C74),
+                      Color(0xCC0D6F67),
+                      Color(0xB3229F93),
+                      Color(0xA00E5A55),
                     ],
                   ),
                 ),
@@ -1646,7 +1838,7 @@ class _PlayerPageState extends State<PlayerPage> {
             ),
           ),
           Positioned(
-            top: 10,
+            top: layout.headerTop,
             left: 12,
             right: 12,
             child: Container(
@@ -1751,39 +1943,102 @@ class _PlayerPageState extends State<PlayerPage> {
                       ),
                     ],
                   ),
-                  const SizedBox(height: 10),
-                  AnimatedSwitcher(
-                    duration: const Duration(milliseconds: 450),
-                    child: SizedBox(
-                      key: ValueKey('${displayProducts.length}:$rotationStep'),
-                      height: 122,
-                      child: ListView.separated(
-                        scrollDirection: Axis.horizontal,
-                        itemCount: 1 + displayProducts.length,
-                        separatorBuilder: (_, index) =>
-                            const SizedBox(width: 10),
-                        itemBuilder: (context, index) {
-                          if (index == 0) {
-                            return _FlashSaleInfoCard(
-                              countdown: countdown,
-                              timeLabel: timeLabel,
-                              note: note,
-                            );
-                          }
-                          final item = displayProducts[index - 1];
-                          final glow =
-                              0.4 + ((index % 2 == 0) ? pulse * 0.6 : 0.4);
-                          return _BeautyFlashCard(
-                            product: item,
-                            pulse: pulse,
-                            glow: glow,
-                          );
-                        },
-                      ),
-                    ),
+                ],
+              ),
+            ),
+          ),
+          Positioned(
+            top: layout.cardsTop,
+            left: 12,
+            right: 12,
+            bottom: layout.cardsBottom,
+            child: Container(
+              padding: const EdgeInsets.fromLTRB(10, 8, 10, 6),
+              decoration: BoxDecoration(
+                gradient: const LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: [Color(0xCC0D6F67), Color(0xAA2AC8BA)],
+                ),
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(color: const Color(0x55FFFFFF), width: 1),
+                boxShadow: const [
+                  BoxShadow(
+                    color: Color(0x22145C56),
+                    blurRadius: 10,
+                    offset: Offset(0, 3),
                   ),
                 ],
               ),
+              child: Align(
+                  alignment: Alignment.center,
+                  child: SizedBox(
+                    key: ValueKey('${products.length}:${autoScrollEnabled ? 1 : 0}'),
+                    height: cardHeight,
+                    child: Padding(
+                      padding: EdgeInsets.symmetric(
+                        horizontal: horizontalListPadding,
+                      ),
+                      child: autoScrollEnabled
+                          ? ClipRect(
+                              child: OverflowBox(
+                                alignment: Alignment.centerLeft,
+                                minWidth: 0,
+                                maxWidth: double.infinity,
+                                child: Transform.translate(
+                                  offset: Offset(-smoothOffset, 0),
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: List<Widget>.generate(
+                                      renderProducts.length,
+                                      (index) {
+                                        final item = renderProducts[index];
+                                        final glow = 0.4 +
+                                            ((index % 2 == 0)
+                                                ? pulse * 0.6
+                                                : 0.4);
+                                        return Padding(
+                                          padding: EdgeInsets.only(
+                                            right: index == renderProducts.length - 1
+                                                ? 0
+                                                : cardGap,
+                                          ),
+                                          child: _BeautyFlashCard(
+                                            product: item,
+                                            pulse: pulse,
+                                            glow: glow,
+                                            height: cardHeight,
+                                            width: dynamicCardWidth,
+                                          ),
+                                        );
+                                      },
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            )
+                          : ListView.separated(
+                              scrollDirection: Axis.horizontal,
+                              shrinkWrap: true,
+                              itemCount: products.length,
+                              separatorBuilder: (_, index) =>
+                                  SizedBox(width: cardGap),
+                              itemBuilder: (context, index) {
+                                final item = products[index];
+                                final glow =
+                                    0.4 + ((index % 2 == 0) ? pulse * 0.6 : 0.4);
+                                return _BeautyFlashCard(
+                                  product: item,
+                                  pulse: pulse,
+                                  glow: glow,
+                                  height: cardHeight,
+                                  width: dynamicCardWidth,
+                                );
+                              },
+                            ),
+                    ),
+                  ),
+                ),
             ),
           ),
           Align(
@@ -1919,16 +2174,36 @@ class _PlayerPageState extends State<PlayerPage> {
           child: Stack(
             fit: StackFit.expand,
             children: [
-              AnimatedPadding(
-                duration: const Duration(milliseconds: 220),
-                curve: Curves.easeOut,
-                padding: EdgeInsets.only(
-                  top: _flashSaleActiveA ? _flashSaleOverlayReservedTop : 0,
-                  bottom: _flashSaleActiveA
-                      ? _flashSaleOverlayReservedBottom
-                      : 0,
-                ),
-                child: _buildGridPlayback(),
+              Builder(
+                builder: (context) {
+                  final layout = _flashSaleLayoutProfileForSize(
+                    MediaQuery.sizeOf(context),
+                  );
+                  return AnimatedPadding(
+                    duration: const Duration(milliseconds: 220),
+                    curve: Curves.easeOut,
+                    padding: EdgeInsets.only(
+                      top: _flashSaleActiveA ? layout.reservedTop : 0,
+                      bottom: _flashSaleActiveA ? layout.reservedBottom : 0,
+                    ),
+                    child: _flashSaleActiveA
+                        ? const DecoratedBox(
+                            decoration: BoxDecoration(
+                              gradient: LinearGradient(
+                                begin: Alignment.topCenter,
+                                end: Alignment.bottomCenter,
+                                colors: [
+                                  Color(0xFF0D6F67),
+                                  Color(0xFF22AFA1),
+                                  Color(0xFF0E5A55),
+                                ],
+                              ),
+                            ),
+                            child: SizedBox.expand(),
+                          )
+                        : _buildGridPlayback(),
+                  );
+                },
               ),
               _buildFlashSaleOverlay(),
             ],
@@ -1954,6 +2229,28 @@ class _PlaylistSelection {
     required this.countdownEndTime,
     required this.note,
     required this.scheduled,
+  });
+}
+
+class _FlashSaleLayoutProfile {
+  final double reservedTop;
+  final double reservedBottom;
+  final double headerTop;
+  final double cardsTop;
+  final double cardsBottom;
+  final double cardHeight;
+  final double infoCardWidth;
+  final double productCardWidth;
+
+  const _FlashSaleLayoutProfile({
+    required this.reservedTop,
+    required this.reservedBottom,
+    required this.headerTop,
+    required this.cardsTop,
+    required this.cardsBottom,
+    required this.cardHeight,
+    required this.infoCardWidth,
+    required this.productCardWidth,
   });
 }
 
@@ -1993,18 +2290,32 @@ class _BeautyFlashCard extends StatelessWidget {
   final _BeautyProduct product;
   final double pulse;
   final double glow;
+  final double height;
+  final double width;
 
   const _BeautyFlashCard({
     required this.product,
     required this.pulse,
     required this.glow,
+    required this.height,
+    required this.width,
   });
 
   @override
   Widget build(BuildContext context) {
+    final compact = height < 270;
+    final isWide = width >= 250;
+    final promoFontSize = compact ? 22.0 : 30.0;
+    final mediaHeight =
+        (height * (compact ? 0.30 : 0.34)).clamp(92.0, 170.0).toDouble();
+    final brandFont = compact ? 11.0 : 13.0;
+    final normalPriceFont = compact ? 10.0 : 12.0;
+    final stockFont = compact ? 11.0 : 13.0;
+    final progressHeight = compact ? 5.0 : 7.0;
     final progress = (product.stockLeft / 20).clamp(0.05, 1.0);
     return Container(
-      width: 212,
+      width: width,
+      height: height,
       decoration: BoxDecoration(
         color: Colors.white.withValues(alpha: 0.96),
         borderRadius: BorderRadius.circular(20),
@@ -2018,7 +2329,7 @@ class _BeautyFlashCard extends StatelessWidget {
         ],
       ),
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(10, 10, 10, 8),
+        padding: EdgeInsets.fromLTRB(12, compact ? 9 : 10, 12, 8),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -2066,13 +2377,13 @@ class _BeautyFlashCard extends StatelessWidget {
                 ),
               ],
             ),
-            const SizedBox(height: 6),
+            const SizedBox(height: 5),
             Text(
               product.name,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: GoogleFonts.montserrat(
-                fontSize: 13,
+                fontSize: isWide ? 16 : 15,
                 fontWeight: FontWeight.w700,
                 color: const Color(0xFF0F172A),
               ),
@@ -2080,18 +2391,24 @@ class _BeautyFlashCard extends StatelessWidget {
             Text(
               product.brand,
               style: GoogleFonts.poppins(
-                fontSize: 11,
+                fontSize: brandFont,
                 color: const Color(0xFF64748B),
                 fontWeight: FontWeight.w500,
               ),
             ),
-            const SizedBox(height: 6),
-            _FlashSaleProductMediaPreview(product: product),
-            const SizedBox(height: 3),
+            const SizedBox(height: 4),
+            Flexible(
+              flex: compact ? 3 : 4,
+              child: _FlashSaleProductMediaPreview(
+                product: product,
+                height: mediaHeight,
+              ),
+            ),
+            const SizedBox(height: 5),
             Text(
               product.normalPrice,
               style: GoogleFonts.poppins(
-                fontSize: 10,
+                fontSize: normalPriceFont,
                 color: const Color(0xFF94A3B8),
                 decoration: TextDecoration.lineThrough,
               ),
@@ -2099,7 +2416,7 @@ class _BeautyFlashCard extends StatelessWidget {
             Text(
               product.promoPrice,
               style: GoogleFonts.montserrat(
-                fontSize: 18,
+                fontSize: isWide ? promoFontSize + 1 : promoFontSize,
                 fontWeight: FontWeight.w900,
                 color: const Color(0xFFDB2777),
                 shadows: [
@@ -2111,20 +2428,20 @@ class _BeautyFlashCard extends StatelessWidget {
                 ],
               ),
             ),
-            const SizedBox(height: 4),
+            const SizedBox(height: 5),
             Text(
               'Sisa ${product.stockLeft} pcs',
               style: GoogleFonts.poppins(
-                fontSize: 10,
+                fontSize: stockFont,
                 color: const Color(0xFF9F1239),
                 fontWeight: FontWeight.w600,
               ),
             ),
-            const SizedBox(height: 2),
+            const SizedBox(height: 3),
             ClipRRect(
               borderRadius: BorderRadius.circular(999),
               child: LinearProgressIndicator(
-                minHeight: 6,
+                minHeight: progressHeight,
                 value: progress,
                 backgroundColor: const Color(0xFFFBCFE8),
                 valueColor: const AlwaysStoppedAnimation<Color>(
@@ -2141,8 +2458,12 @@ class _BeautyFlashCard extends StatelessWidget {
 
 class _FlashSaleProductMediaPreview extends StatelessWidget {
   final _BeautyProduct product;
+  final double height;
 
-  const _FlashSaleProductMediaPreview({required this.product});
+  const _FlashSaleProductMediaPreview({
+    required this.product,
+    this.height = 40,
+  });
 
   Widget _placeholder(String message) {
     return Center(
@@ -2172,14 +2493,14 @@ class _FlashSaleProductMediaPreview extends StatelessWidget {
         child: hasLocal
             ? Image.file(
                 File(product.mediaLocalPath),
-                fit: BoxFit.contain,
+                fit: BoxFit.cover,
                 width: double.infinity,
                 height: double.infinity,
                 errorBuilder: (context, error, stackTrace) {
                   if (hasRemote) {
                     return Image.network(
                       product.mediaUrl,
-                      fit: BoxFit.contain,
+                      fit: BoxFit.cover,
                       width: double.infinity,
                       height: double.infinity,
                       errorBuilder: (context, error, stackTrace) =>
@@ -2191,7 +2512,7 @@ class _FlashSaleProductMediaPreview extends StatelessWidget {
               )
             : Image.network(
                 product.mediaUrl,
-                fit: BoxFit.contain,
+                fit: BoxFit.cover,
                 width: double.infinity,
                 height: double.infinity,
                 errorBuilder: (context, error, stackTrace) =>
@@ -2219,9 +2540,9 @@ class _FlashSaleProductMediaPreview extends StatelessWidget {
     }
 
     return Container(
-      height: 40,
+      height: height,
       width: double.infinity,
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+      padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 3),
       decoration: BoxDecoration(
         color: const Color(0xFFFDF2F8),
         borderRadius: BorderRadius.circular(10),
@@ -2236,17 +2557,22 @@ class _FlashSaleInfoCard extends StatelessWidget {
   final String countdown;
   final String timeLabel;
   final String note;
+  final double height;
+  final double width;
 
   const _FlashSaleInfoCard({
     required this.countdown,
     required this.timeLabel,
     required this.note,
+    required this.height,
+    required this.width,
   });
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      width: 248,
+      width: width,
+      height: height,
       decoration: BoxDecoration(
         color: Colors.white.withValues(alpha: 0.96),
         borderRadius: BorderRadius.circular(20),
@@ -2379,6 +2705,17 @@ class _RunningTextBanner extends StatefulWidget {
 class _RunningTextBannerState extends State<_RunningTextBanner>
     with SingleTickerProviderStateMixin {
   late final AnimationController _controller;
+  static const double _gapAfterText = 40;
+  static const double _speedPxPerSec = 72;
+  static const TextStyle _textStyle = TextStyle(
+    color: Color(0xFFFFF7ED),
+    fontSize: 20,
+    fontWeight: FontWeight.w700,
+    letterSpacing: 0.3,
+  );
+  String _lastText = '';
+  double _lastViewWidth = -1;
+  double _track = 1;
 
   @override
   void initState() {
@@ -2386,7 +2723,7 @@ class _RunningTextBannerState extends State<_RunningTextBanner>
     _controller = AnimationController(
       vsync: this,
       duration: const Duration(seconds: 12),
-    )..repeat();
+    );
   }
 
   @override
@@ -2396,46 +2733,67 @@ class _RunningTextBannerState extends State<_RunningTextBanner>
   }
 
   @override
+  void didUpdateWidget(covariant _RunningTextBanner oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.text != widget.text) {
+      _lastText = '';
+    }
+  }
+
+  void _ensureMetrics(double viewWidth) {
+    final normalizedText = widget.text.trim();
+    if (normalizedText.isEmpty) return;
+    if (_lastText == normalizedText && (_lastViewWidth - viewWidth).abs() < 0.5) {
+      return;
+    }
+    final painter = TextPainter(
+      text: TextSpan(text: normalizedText, style: _textStyle),
+      textDirection: TextDirection.ltr,
+      maxLines: 1,
+    )..layout();
+    final textWidth = painter.width;
+    _track = viewWidth + textWidth + _gapAfterText;
+    final durationMs = ((_track / _speedPxPerSec) * 1000)
+        .clamp(7000, 36000)
+        .round();
+    _controller.duration = Duration(milliseconds: durationMs);
+    _controller.repeat();
+    _lastText = normalizedText;
+    _lastViewWidth = viewWidth;
+  }
+
+  @override
   Widget build(BuildContext context) {
-    return Container(
-      height: widget.height,
-      width: double.infinity,
-      clipBehavior: Clip.hardEdge,
-      decoration: BoxDecoration(
-        color: Colors.black.withValues(alpha: 0.35),
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: LayoutBuilder(
-        builder: (context, constraints) {
-          final textStyle = const TextStyle(
-            color: Color(0xFFFFF7ED),
-            fontSize: 20,
-            fontWeight: FontWeight.w700,
-            letterSpacing: 0.3,
-          );
-          final painter = TextPainter(
-            text: TextSpan(text: widget.text, style: textStyle),
-            textDirection: TextDirection.ltr,
-            maxLines: 1,
-          )..layout();
-          final textWidth = painter.width;
-          final track = constraints.maxWidth + textWidth + 40;
-          return AnimatedBuilder(
-            animation: _controller,
-            builder: (context, child) {
-              final x = constraints.maxWidth - (_controller.value * track);
-              return Transform.translate(offset: Offset(x, 0), child: child);
-            },
-            child: Align(
-              alignment: Alignment.centerLeft,
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 4),
-                child: Text(widget.text, maxLines: 1, style: textStyle),
+    return RepaintBoundary(
+      child: Container(
+        height: widget.height,
+        width: double.infinity,
+        clipBehavior: Clip.hardEdge,
+        decoration: BoxDecoration(
+          color: Colors.black.withValues(alpha: 0.35),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            _ensureMetrics(constraints.maxWidth);
+            return AnimatedBuilder(
+              animation: _controller,
+              builder: (context, child) {
+                final x = constraints.maxWidth - (_controller.value * _track);
+                return Transform.translate(offset: Offset(x, 0), child: child);
+              },
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 4),
+                  child: Text(widget.text, maxLines: 1, style: _textStyle),
+                ),
               ),
-            ),
-          );
-        },
+            );
+          },
+        ),
       ),
     );
   }
 }
+
