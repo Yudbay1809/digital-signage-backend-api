@@ -8,6 +8,11 @@
 Flutter-based digital signage player application.  
 This app is designed for unattended screens with playlist sync, local caching, and full-screen playback.
 
+## Final Release Notes
+- Analyzer warning cleanup completed (no remaining `flutter analyze` issues).
+- Verified end-to-end against backend final contract (`/devices/{id}/config`, websocket refresh flow).
+- Player works with normalized media URL path from backend (`/storage/media/<file>`).
+
 ## Highlights
 
 - Device registration flow with server base URL configuration
@@ -21,6 +26,7 @@ This app is designed for unattended screens with playlist sync, local caching, a
 - Smooth auto-scrolling Flash Sale cards when product count is more than 5
 - Smooth running text banner optimized for TV playback
 - Countdown parser hardened for UTC/naive timestamp variants from backend
+- Supports static server base URL setup (recommended for production LAN deployment)
 
 ## Tech Stack
 
@@ -47,8 +53,8 @@ test/
 
 ### Prerequisites
 
-- Flutter `3.38.x` (stable channel)
-- Dart `3.10.x`
+- Flutter stable (`3.38+`)
+- Dart (`3.10+`)
 - Android SDK (for Android build target)
 
 ### Run Locally
@@ -90,6 +96,14 @@ flutter build apk --release
 
 Output:
 - `build/app/outputs/flutter-apk/app-release.apk`
+
+## Build Release Windows (Smoke)
+```bash
+flutter build windows --release
+```
+
+Output:
+- `build/windows/x64/runner/Release/digital_signage_backend_api.exe`
 
 ## Maintainer
 - Yudbay1809
