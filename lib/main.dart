@@ -512,8 +512,9 @@ class _PlayerPageState extends State<PlayerPage> {
           final discoveredPort = (data['server_port'] ?? '$port')
               .toString()
               .trim();
-          if (discoveredPort.isNotEmpty)
+          if (discoveredPort.isNotEmpty) {
             return '$scheme://$host:$discoveredPort';
+          }
           return '$scheme://$host';
         }
 
@@ -525,8 +526,9 @@ class _PlayerPageState extends State<PlayerPage> {
           final discoveredPort = (data['server_port'] ?? '$port')
               .toString()
               .trim();
-          if (discoveredPort.isNotEmpty)
+          if (discoveredPort.isNotEmpty) {
             return '$scheme://$host:$discoveredPort';
+          }
           return '$scheme://$host';
         }
       } catch (_) {}
@@ -1056,8 +1058,9 @@ class _PlayerPageState extends State<PlayerPage> {
         _realtimeSocket != null ||
         _deviceId == null ||
         _baseUrl.isEmpty ||
-        _needsRegistration)
+        _needsRegistration) {
       return;
+    }
     _realtimeConnecting = true;
     try {
       final wsUrl = '${_toWsUrl(_baseUrl)}/ws/updates';
