@@ -89,7 +89,7 @@ class _PlayerPageState extends State<PlayerPage> {
   static const String _defaultServerBaseUrl = '';
   final Duration _heartbeatInterval = const Duration(seconds: 30);
   final Duration _configPollInterval = const Duration(seconds: 8);
-  final Duration _realtimeSafetyPollInterval = const Duration(seconds: 30);
+  final Duration _realtimeSafetyPollInterval = const Duration(seconds: 10);
   final int _maxCacheBytes = 4 * 1024 * 1024 * 1024; // 4 GB
 
   String _baseUrl = '';
@@ -104,6 +104,7 @@ class _PlayerPageState extends State<PlayerPage> {
   DateTime? _flashSaleCountdownEndsAtA;
   String _flashSaleNoteA = '';
   String _flashSaleProductsJsonA = '';
+  List<_BeautyProduct> _flashSaleProductsA = const [];
   String? _preFlashSalePlaylistIdA;
   String? _flashSaleAutoReturnedFromPlaylistA;
   bool _loading = true;
@@ -114,6 +115,7 @@ class _PlayerPageState extends State<PlayerPage> {
   String? _lastSyncedOrientation;
   String? _lastConfigSignature;
   bool _syncInProgress = false;
+  bool _mediaSyncInProgress = false;
   bool _needsRegistration = false;
   bool _registering = false;
   String? _registrationNotice;
@@ -132,13 +134,16 @@ class _PlayerPageState extends State<PlayerPage> {
   Timer? _flashOverlayTimer;
   Timer? _realtimeReconnectTimer;
   Timer? _realtimePingTimer;
+  Timer? _realtimeSyncDebounce;
   Timer? _settingsHoldTimer;
   WebSocket? _realtimeSocket;
   bool _realtimeConnecting = false;
   bool _realtimeEnabled = false;
   bool _realtimeConnected = false;
+  int _lastRealtimeRevision = 0;
   DeviceConfig? _cachedConfig;
   Map<String, String> _cachedLocalMap = const {};
+  final ValueNotifier<int> _flashOverlayTick = ValueNotifier<int>(0);
 
   @override
   void initState() {
@@ -204,7 +209,9 @@ class _PlayerPageState extends State<PlayerPage> {
     _flashOverlayTimer?.cancel();
     _settingsHoldTimer?.cancel();
     _realtimePingTimer?.cancel();
+    _realtimeSyncDebounce?.cancel();
     _stopRealtimeChannel();
+    _flashOverlayTick.dispose();
     _registerNameController.dispose();
     _registerLocationController.dispose();
     _registerBaseUrlController.dispose();
@@ -309,6 +316,7 @@ class _PlayerPageState extends State<PlayerPage> {
       _flashSaleCountdownEndsAtA = null;
       _flashSaleNoteA = '';
       _flashSaleProductsJsonA = '';
+      _flashSaleProductsA = const [];
       _preFlashSalePlaylistIdA = null;
       _flashSaleAutoReturnedFromPlaylistA = null;
       _cachedConfig = null;
@@ -814,9 +822,9 @@ class _PlayerPageState extends State<PlayerPage> {
 
   void _startFlashOverlayTicker() {
     _flashOverlayTimer?.cancel();
-    _flashOverlayTimer = Timer.periodic(const Duration(milliseconds: 33), (_) {
+    _flashOverlayTimer = Timer.periodic(const Duration(milliseconds: 100), (_) {
       if (!mounted || !_flashSaleActiveA) return;
-      setState(() {});
+      _flashOverlayTick.value++;
     });
   }
 
@@ -866,18 +874,52 @@ class _PlayerPageState extends State<PlayerPage> {
     try {
       await _syncDetectedOrientation();
       final config = await _api.fetchConfig(_deviceId!);
-      final localMap = await _sync.syncMedia(config.media);
       _cachedConfig = config;
-      _cachedLocalMap = localMap;
+      // Apply new config immediately so playlist switch isn't blocked by media checksum/download.
       _applyConfigToPlayback(
         config,
-        localMap,
+        _cachedLocalMap,
         force: force,
         setLoadingFalse: setLoadingFalse,
       );
+      unawaited(_syncMediaInBackground(config));
     } finally {
       _syncInProgress = false;
     }
+  }
+
+  Future<void> _syncMediaInBackground(DeviceConfig config) async {
+    if (_mediaSyncInProgress) return;
+    _mediaSyncInProgress = true;
+    try {
+      final localMap = await _sync.syncMedia(config.media);
+      if (!mounted) return;
+      final mediaBindingChanged = _hasActiveMediaBindingChanged(localMap);
+      _cachedLocalMap = localMap;
+      if (mediaBindingChanged) {
+        // Re-apply only when local binding used by active playback really changes.
+        _applyConfigToPlayback(
+          config,
+          localMap,
+          force: true,
+          setLoadingFalse: false,
+        );
+      }
+    } catch (_) {
+      // Keep playback running via remote URL; retry on next sync cycle.
+    } finally {
+      _mediaSyncInProgress = false;
+    }
+  }
+
+  bool _hasActiveMediaBindingChanged(Map<String, String> nextLocalMap) {
+    if (_itemsA.isEmpty) return false;
+    for (final item in _itemsA) {
+      final prev = (_cachedLocalMap[item.id] ?? '').trim();
+      final next = (nextLocalMap[item.id] ?? '').trim();
+      if (prev != next) return true;
+    }
+    return false;
   }
 
   void _applyConfigToPlayback(
@@ -976,6 +1018,12 @@ class _PlayerPageState extends State<PlayerPage> {
     final flashProductsJson = campaignActive
         ? campaignProductsJson
         : ((nextPlaylist?.flashItemsJson ?? '').trim());
+    final nextFlashSaleProducts = _resolveFlashSaleProducts(
+      cfg: config,
+      localMap: localMap,
+      playlistId: nextSyncKeyA,
+      flashProductsJson: flashProductsJson,
+    );
     final nextGridPresetA = isFlashSale ? '1x1' : configuredGridPresetA;
     final playlistSwitchNeeded = nextSyncKeyA != _syncKeyA;
     final gridChanged = nextGridPresetA != _gridPresetA;
@@ -1029,6 +1077,7 @@ class _PlayerPageState extends State<PlayerPage> {
       _flashSaleCountdownEndsAtA = flashCountdownEnd;
       _flashSaleNoteA = flashNote;
       _flashSaleProductsJsonA = flashProductsJson;
+      _flashSaleProductsA = nextFlashSaleProducts;
       _preFlashSalePlaylistIdA = nextPreFlashSalePlaylistIdA;
       if (setLoadingFalse) _loading = false;
     });
@@ -1039,6 +1088,44 @@ class _PlayerPageState extends State<PlayerPage> {
       return 'ws://${baseUrl.substring('http://'.length)}';
     }
     return 'ws://$baseUrl';
+  }
+
+  bool _shouldSyncForRealtimeMessage(dynamic raw) {
+    if (raw is! String) return false;
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map<String, dynamic>) return false;
+      final type = (decoded['type'] ?? '').toString();
+      if (type != 'config_changed' && type != 'device_status_changed') {
+        return false;
+      }
+      final revision = (decoded['revision'] as num?)?.toInt() ?? 0;
+      if (revision > 0) {
+        if (revision <= _lastRealtimeRevision) return false;
+        _lastRealtimeRevision = revision;
+      }
+      if (type == 'config_changed') {
+        final payload = decoded['payload'];
+        if (payload is Map<String, dynamic>) {
+          final path = (payload['path'] ?? '').toString();
+          if (path.contains('/heartbeat')) return false;
+        }
+      }
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  void _queueRealtimeSync(dynamic raw) {
+    if (!_shouldSyncForRealtimeMessage(raw)) return;
+    if (_realtimeSyncDebounce?.isActive == true) return;
+    _realtimeSyncDebounce = Timer(const Duration(milliseconds: 700), () async {
+      if (_deviceId == null || _needsRegistration) return;
+      try {
+        await _syncFromServer(force: false);
+      } catch (_) {}
+    });
   }
 
   void _startRealtimeChannel() {
@@ -1085,24 +1172,17 @@ class _PlayerPageState extends State<PlayerPage> {
       try {
         await _syncFromServer(force: true);
       } catch (_) {}
-      await for (final _ in socket) {
+      await for (final message in socket) {
         if (_deviceId == null || _needsRegistration) break;
-        try {
-          await _syncFromServer(force: true);
-        } catch (e) {
-          if (_looksLikeDeviceNotFoundError(e)) {
-            await _switchToRegistrationRequired(
-              'Device terhapus dari server. Silakan registrasi terlebih dahulu.',
-            );
-            break;
-          }
-        }
+        _queueRealtimeSync(message);
       }
     } catch (_) {
       // fallback stays on periodic polling
     } finally {
       _realtimePingTimer?.cancel();
       _realtimePingTimer = null;
+      _realtimeSyncDebounce?.cancel();
+      _realtimeSyncDebounce = null;
       try {
         await _realtimeSocket?.close();
       } catch (_) {}
@@ -1122,6 +1202,8 @@ class _PlayerPageState extends State<PlayerPage> {
     _realtimeReconnectTimer = null;
     _realtimePingTimer?.cancel();
     _realtimePingTimer = null;
+    _realtimeSyncDebounce?.cancel();
+    _realtimeSyncDebounce = null;
     try {
       _realtimeSocket?.close();
     } catch (_) {}
@@ -1236,8 +1318,17 @@ class _PlayerPageState extends State<PlayerPage> {
   }
 
   String _absoluteUrl(String path) {
-    if (path.startsWith('http')) return path;
-    return '$_baseUrl$path';
+    final raw = path.trim();
+    if (raw.isEmpty) return raw;
+    final normalized = raw.replaceAll('\\', '/');
+    if (normalized.startsWith('http://') || normalized.startsWith('https://')) {
+      final parsed = Uri.tryParse(normalized);
+      return parsed?.toString() ?? normalized;
+    }
+    final base = Uri.tryParse(_baseUrl);
+    if (base == null) return normalized;
+    final resolved = base.resolveUri(Uri(path: normalized));
+    return resolved.toString();
   }
 
   _PlaylistSelection _resolvePlaylistSelection(
@@ -1632,15 +1723,18 @@ class _PlayerPageState extends State<PlayerPage> {
     return '$minutes:$seconds';
   }
 
-  List<_BeautyProduct> _flashSaleProductsFromActiveSource() {
-    final cfg = _cachedConfig;
-    if (cfg == null) return const [];
+  List<_BeautyProduct> _resolveFlashSaleProducts({
+    required DeviceConfig cfg,
+    required Map<String, String> localMap,
+    required String playlistId,
+    required String flashProductsJson,
+  }) {
     final mediaById = <String, MediaItem>{for (final m in cfg.media) m.id: m};
-    var raw = _flashSaleProductsJsonA.trim();
+    var raw = flashProductsJson.trim();
     if (raw.isEmpty) {
       PlaylistConfig? active;
       for (final item in cfg.playlists) {
-        if (item.id == _syncKeyA) {
+        if (item.id == playlistId) {
           active = item;
           break;
         }
@@ -1673,7 +1767,7 @@ class _PlayerPageState extends State<PlayerPage> {
                 int.tryParse((row['stock'] ?? '').toString().trim()) ?? 0,
             mediaType: linkedMedia?.type ?? '',
             mediaUrl: linkedPath.isEmpty ? '' : _absoluteUrl(linkedPath),
-            mediaLocalPath: _cachedLocalMap[mediaId] ?? '',
+            mediaLocalPath: localMap[mediaId] ?? '',
           ),
         );
       }
@@ -1706,9 +1800,8 @@ class _PlayerPageState extends State<PlayerPage> {
     final minute = now.minute.toString().padLeft(2, '0');
     final second = now.second.toString().padLeft(2, '0');
     final timeLabel = '$hour:$minute:$second';
-    final dynamicProducts = _flashSaleProductsFromActiveSource();
-    final products = dynamicProducts.isNotEmpty
-        ? dynamicProducts
+    final products = _flashSaleProductsA.isNotEmpty
+        ? _flashSaleProductsA
         : const <_BeautyProduct>[
             _BeautyProduct(
               name: 'Cushion Foundation',
@@ -2205,7 +2298,10 @@ class _PlayerPageState extends State<PlayerPage> {
                   );
                 },
               ),
-              _buildFlashSaleOverlay(),
+              ValueListenableBuilder<int>(
+                valueListenable: _flashOverlayTick,
+                builder: (context, tick, child) => _buildFlashSaleOverlay(),
+              ),
             ],
           ),
         ),
@@ -2488,21 +2584,35 @@ class _FlashSaleProductMediaPreview extends StatelessWidget {
 
     Widget content;
     if (hasPreview) {
+      final ImageProvider? localProvider = hasLocal
+          ? ResizeImage(
+              FileImage(File(product.mediaLocalPath)),
+              width: 1280,
+            )
+          : null;
+      final ImageProvider? remoteProvider = hasRemote
+          ? ResizeImage(
+              NetworkImage(product.mediaUrl),
+              width: 1280,
+            )
+          : null;
       content = ClipRRect(
         borderRadius: BorderRadius.circular(10),
         child: hasLocal
-            ? Image.file(
-                File(product.mediaLocalPath),
+            ? Image(
+                image: localProvider!,
                 fit: BoxFit.cover,
                 width: double.infinity,
                 height: double.infinity,
+                filterQuality: FilterQuality.low,
                 errorBuilder: (context, error, stackTrace) {
                   if (hasRemote) {
-                    return Image.network(
-                      product.mediaUrl,
+                    return Image(
+                      image: remoteProvider!,
                       fit: BoxFit.cover,
                       width: double.infinity,
                       height: double.infinity,
+                      filterQuality: FilterQuality.low,
                       errorBuilder: (context, error, stackTrace) =>
                           _placeholder('Gagal memuat gambar'),
                     );
@@ -2510,11 +2620,12 @@ class _FlashSaleProductMediaPreview extends StatelessWidget {
                   return _placeholder('Gagal memuat gambar');
                 },
               )
-            : Image.network(
-                product.mediaUrl,
+            : Image(
+                image: remoteProvider!,
                 fit: BoxFit.cover,
                 width: double.infinity,
                 height: double.infinity,
+                filterQuality: FilterQuality.low,
                 errorBuilder: (context, error, stackTrace) =>
                     _placeholder('Gagal memuat gambar'),
               ),

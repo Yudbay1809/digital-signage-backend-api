@@ -61,7 +61,16 @@ class SyncService {
   }
 
   String _absoluteUrl(String path) {
-    if (path.startsWith('http')) return path;
-    return '$baseUrl$path';
+    final raw = path.trim();
+    if (raw.isEmpty) return raw;
+    final normalized = raw.replaceAll('\\', '/');
+    if (normalized.startsWith('http://') || normalized.startsWith('https://')) {
+      final parsed = Uri.tryParse(normalized);
+      return parsed?.toString() ?? normalized;
+    }
+    final base = Uri.tryParse(baseUrl);
+    if (base == null) return normalized;
+    final resolved = base.resolveUri(Uri(path: normalized));
+    return resolved.toString();
   }
 }
