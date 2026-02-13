@@ -17,6 +17,12 @@ This app is designed for unattended screens with playlist sync, local caching, a
 - Realtime sync is less aggressive: websocket messages are filtered/debounced and heartbeat mutation noise is ignored.
 - Playback transition stability improved with prewarm + cache-ready switching strategy.
 - Video transition path now avoids heavy fade composition to reduce frame drop risk.
+- Flash Sale overlay runtime load reduced (lighter ticker cadence and smoother auto-scroll pipeline).
+- Android stability hardening for heavy image playlists:
+  - capped image decode width
+  - smaller image cache budget
+  - cache trim on item switch
+- Global error handling added for unattended signage mode (errors logged, disruptive UI error overlays suppressed).
 
 ## Highlights
 

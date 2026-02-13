@@ -2,7 +2,9 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
+import 'package:flutter/painting.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:http/http.dart' as http;
@@ -17,7 +19,30 @@ import 'services/sync.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  runApp(const SignageApp());
+  // Keep image cache small on low-end Android signage devices.
+  PaintingBinding.instance.imageCache.maximumSize = 120;
+  PaintingBinding.instance.imageCache.maximumSizeBytes = 80 << 20; // 80 MB
+  _configureGlobalErrorHandling();
+  runZonedGuarded(
+    () => runApp(const SignageApp()),
+    (error, stackTrace) {
+      debugPrint('UNCAUGHT ZONE ERROR: $error');
+      debugPrintStack(stackTrace: stackTrace);
+    },
+  );
+}
+
+void _configureGlobalErrorHandling() {
+  FlutterError.onError = (details) {
+    debugPrint('FLUTTER ERROR: ${details.exceptionAsString()}');
+    debugPrintStack(stackTrace: details.stack);
+  };
+  ErrorWidget.builder = (details) => const ColoredBox(color: Colors.black);
+  ui.PlatformDispatcher.instance.onError = (error, stackTrace) {
+    debugPrint('PLATFORM ERROR: $error');
+    debugPrintStack(stackTrace: stackTrace);
+    return true;
+  };
 }
 
 class SignageApp extends StatelessWidget {
@@ -87,6 +112,8 @@ class PlayerPage extends StatefulWidget {
 
 class _PlayerPageState extends State<PlayerPage> {
   static const String _defaultServerBaseUrl = '';
+  static const bool _strictLocalOnlyPlayback = true;
+  static const int _precacheGateMinItems = 2;
   final Duration _heartbeatInterval = const Duration(seconds: 30);
   final Duration _configPollInterval = const Duration(seconds: 8);
   final Duration _realtimeSafetyPollInterval = const Duration(seconds: 10);
@@ -141,6 +168,7 @@ class _PlayerPageState extends State<PlayerPage> {
   bool _realtimeEnabled = false;
   bool _realtimeConnected = false;
   int _lastRealtimeRevision = 0;
+  bool _cacheGatePending = false;
   DeviceConfig? _cachedConfig;
   Map<String, String> _cachedLocalMap = const {};
   final ValueNotifier<int> _flashOverlayTick = ValueNotifier<int>(0);
@@ -822,7 +850,7 @@ class _PlayerPageState extends State<PlayerPage> {
 
   void _startFlashOverlayTicker() {
     _flashOverlayTimer?.cancel();
-    _flashOverlayTimer = Timer.periodic(const Duration(milliseconds: 100), (_) {
+    _flashOverlayTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!mounted || !_flashSaleActiveA) return;
       _flashOverlayTick.value++;
     });
@@ -896,12 +924,12 @@ class _PlayerPageState extends State<PlayerPage> {
       if (!mounted) return;
       final mediaBindingChanged = _hasActiveMediaBindingChanged(localMap);
       _cachedLocalMap = localMap;
-      if (mediaBindingChanged) {
-        // Re-apply only when local binding used by active playback really changes.
+      if (mediaBindingChanged || _cacheGatePending || _itemsA.isEmpty) {
+        // Re-apply when active binding changes, initial load, or cache gate was pending.
         _applyConfigToPlayback(
           config,
           localMap,
-          force: true,
+          force: false,
           setLoadingFalse: false,
         );
       }
@@ -918,6 +946,40 @@ class _PlayerPageState extends State<PlayerPage> {
       final prev = (_cachedLocalMap[item.id] ?? '').trim();
       final next = (nextLocalMap[item.id] ?? '').trim();
       if (prev != next) return true;
+    }
+    return false;
+  }
+
+  bool _localFileExists(String? path) {
+    final candidate = (path ?? '').trim();
+    if (candidate.isEmpty) return false;
+    try {
+      return File(candidate).existsSync();
+    } catch (_) {
+      return false;
+    }
+  }
+
+  bool _isPlaylistCacheReady(
+    DeviceConfig cfg,
+    Map<String, String> localMap,
+    String playlistId,
+  ) {
+    if (cfg.playlists.isEmpty) return true;
+    final target = cfg.playlists.firstWhere(
+      (playlist) => playlist.id == playlistId,
+      orElse: () => cfg.playlists.first,
+    );
+    if (target.items.isEmpty) return true;
+
+    final requiredReady = math.min(_precacheGateMinItems, target.items.length);
+    var readyCount = 0;
+    for (final item in target.items) {
+      final local = localMap[item.mediaId];
+      if (_localFileExists(local)) {
+        readyCount += 1;
+        if (readyCount >= requiredReady) return true;
+      }
     }
     return false;
   }
@@ -1026,6 +1088,18 @@ class _PlayerPageState extends State<PlayerPage> {
     );
     final nextGridPresetA = isFlashSale ? '1x1' : configuredGridPresetA;
     final playlistSwitchNeeded = nextSyncKeyA != _syncKeyA;
+    final cacheReady = !_strictLocalOnlyPlayback
+        ? true
+        : _isPlaylistCacheReady(config, localMap, nextSyncKeyA);
+    if (_strictLocalOnlyPlayback &&
+        (playlistSwitchNeeded || _itemsA.isEmpty) &&
+        !cacheReady) {
+      _cacheGatePending = true;
+      if (setLoadingFalse && mounted && _loading) {
+        setState(() => _loading = false);
+      }
+      return;
+    }
     final gridChanged = nextGridPresetA != _gridPresetA;
     final transitionChanged =
         nextTransitionDurationSecA != _transitionDurationSecA;
@@ -1062,7 +1136,9 @@ class _PlayerPageState extends State<PlayerPage> {
       localMap,
       index: 0,
       overridePlaylistId: nextSyncKeyA,
+      strictLocalOnly: _strictLocalOnlyPlayback,
     );
+    _cacheGatePending = false;
     _lastConfigSignature = nextSignature;
     if (!mounted) return;
     setState(() {
@@ -1263,6 +1339,7 @@ class _PlayerPageState extends State<PlayerPage> {
     Map<String, String> localMap, {
     required int index,
     String? overridePlaylistId,
+    bool strictLocalOnly = false,
   }) {
     if (cfg.screens.length <= index || cfg.playlists.isEmpty) return const [];
 
@@ -1290,13 +1367,17 @@ class _PlayerPageState extends State<PlayerPage> {
         continue;
       }
       final duration = item.durationSec ?? media.durationSec ?? 10;
+      final localPath = localMap[media.id];
+      if (strictLocalOnly && !_localFileExists(localPath)) {
+        continue;
+      }
       items.add(
         PlaybackItem(
           id: media.id,
           type: media.type,
           url: _absoluteUrl(media.path),
           durationSec: duration,
-          localPath: localMap[media.id],
+          localPath: localPath,
         ),
       );
     }
@@ -1409,7 +1490,9 @@ class _PlayerPageState extends State<PlayerPage> {
       final activePlaylist = playlistById[bestActive.schedule.playlistId];
       final playlistCountdown = activePlaylist?.flashCountdownSec ?? 0;
       if (playlistCountdown > 0) {
-        countdownEnd = bestActive.start.add(Duration(seconds: playlistCountdown));
+        countdownEnd = bestActive.start.add(
+          Duration(seconds: playlistCountdown),
+        );
       }
       return _PlaylistSelection(
         playlistId: bestActive.schedule.playlistId,
@@ -1861,7 +1944,8 @@ class _PlayerPageState extends State<PlayerPage> {
           ];
     const maxVisibleProducts = 5;
     final autoScrollEnabled = products.length > maxVisibleProducts;
-    final isTvLandscape = (size.width / size.height) >= 1.6 && size.width >= 1180;
+    final isTvLandscape =
+        (size.width / size.height) >= 1.6 && size.width >= 1180;
     final horizontalListPadding = isTvLandscape ? 6.0 : 8.0;
     final cardGap = isTvLandscape ? 10.0 : 12.0;
     final cardsRegionHeight =
@@ -1885,19 +1969,8 @@ class _PlayerPageState extends State<PlayerPage> {
     final dynamicCardWidth = (rowWidthAfterGap / visibleCount)
         .clamp(layout.productCardWidth, layout.productCardWidth + 170)
         .toDouble();
-    final baseLoopWidth =
-        (products.length * dynamicCardWidth) +
-        ((products.length - 1) * cardGap);
-    final pxPerSecond = dynamicCardWidth / 3.2;
-    final elapsedSec = now.millisecondsSinceEpoch / 1000.0;
-    final smoothOffset = autoScrollEnabled
-        ? ((elapsedSec * pxPerSecond) % (baseLoopWidth + cardGap))
-        : 0.0;
-    final renderProducts = autoScrollEnabled
-        ? <_BeautyProduct>[...products, ...products]
-        : products;
-    final pulse = 0.94 + (math.sin(now.millisecondsSinceEpoch / 380) * 0.06);
-    final shimmer = (now.millisecondsSinceEpoch % 2800) / 2800.0;
+    const pulse = 1.0;
+    const shimmer = 0.35;
 
     String marqueeText(String src) {
       final cleaned = src.trim();
@@ -2064,74 +2137,45 @@ class _PlayerPageState extends State<PlayerPage> {
                 ],
               ),
               child: Align(
-                  alignment: Alignment.center,
-                  child: SizedBox(
-                    key: ValueKey('${products.length}:${autoScrollEnabled ? 1 : 0}'),
-                    height: cardHeight,
-                    child: Padding(
-                      padding: EdgeInsets.symmetric(
-                        horizontal: horizontalListPadding,
-                      ),
-                      child: autoScrollEnabled
-                          ? ClipRect(
-                              child: OverflowBox(
-                                alignment: Alignment.centerLeft,
-                                minWidth: 0,
-                                maxWidth: double.infinity,
-                                child: Transform.translate(
-                                  offset: Offset(-smoothOffset, 0),
-                                  child: Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: List<Widget>.generate(
-                                      renderProducts.length,
-                                      (index) {
-                                        final item = renderProducts[index];
-                                        final glow = 0.4 +
-                                            ((index % 2 == 0)
-                                                ? pulse * 0.6
-                                                : 0.4);
-                                        return Padding(
-                                          padding: EdgeInsets.only(
-                                            right: index == renderProducts.length - 1
-                                                ? 0
-                                                : cardGap,
-                                          ),
-                                          child: _BeautyFlashCard(
-                                            product: item,
-                                            pulse: pulse,
-                                            glow: glow,
-                                            height: cardHeight,
-                                            width: dynamicCardWidth,
-                                          ),
-                                        );
-                                      },
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            )
-                          : ListView.separated(
-                              scrollDirection: Axis.horizontal,
-                              shrinkWrap: true,
-                              itemCount: products.length,
-                              separatorBuilder: (_, index) =>
-                                  SizedBox(width: cardGap),
-                              itemBuilder: (context, index) {
-                                final item = products[index];
-                                final glow =
-                                    0.4 + ((index % 2 == 0) ? pulse * 0.6 : 0.4);
-                                return _BeautyFlashCard(
-                                  product: item,
-                                  pulse: pulse,
-                                  glow: glow,
-                                  height: cardHeight,
-                                  width: dynamicCardWidth,
-                                );
-                              },
-                            ),
+                alignment: Alignment.center,
+                child: SizedBox(
+                  key: ValueKey(
+                    '${products.length}:${autoScrollEnabled ? 1 : 0}',
+                  ),
+                  height: cardHeight,
+                  child: Padding(
+                    padding: EdgeInsets.symmetric(
+                      horizontal: horizontalListPadding,
                     ),
+                    child: autoScrollEnabled
+                        ? _AutoScrollFlashCards(
+                            products: products,
+                            cardHeight: cardHeight,
+                            cardWidth: dynamicCardWidth,
+                            cardGap: cardGap,
+                            pulse: pulse,
+                          )
+                        : ListView.separated(
+                            scrollDirection: Axis.horizontal,
+                            shrinkWrap: true,
+                            itemCount: products.length,
+                            separatorBuilder: (_, index) =>
+                                SizedBox(width: cardGap),
+                            itemBuilder: (context, index) {
+                              final item = products[index];
+                              const glow = 0.74;
+                              return _BeautyFlashCard(
+                                product: item,
+                                pulse: pulse,
+                                glow: glow,
+                                height: cardHeight,
+                                width: dynamicCardWidth,
+                              );
+                            },
+                          ),
                   ),
                 ),
+              ),
             ),
           ),
           Align(
@@ -2402,8 +2446,9 @@ class _BeautyFlashCard extends StatelessWidget {
     final compact = height < 270;
     final isWide = width >= 250;
     final promoFontSize = compact ? 22.0 : 30.0;
-    final mediaHeight =
-        (height * (compact ? 0.30 : 0.34)).clamp(92.0, 170.0).toDouble();
+    final mediaHeight = (height * (compact ? 0.30 : 0.34))
+        .clamp(92.0, 170.0)
+        .toDouble();
     final brandFont = compact ? 11.0 : 13.0;
     final normalPriceFont = compact ? 10.0 : 12.0;
     final stockFont = compact ? 11.0 : 13.0;
@@ -2585,16 +2630,10 @@ class _FlashSaleProductMediaPreview extends StatelessWidget {
     Widget content;
     if (hasPreview) {
       final ImageProvider? localProvider = hasLocal
-          ? ResizeImage(
-              FileImage(File(product.mediaLocalPath)),
-              width: 1280,
-            )
+          ? ResizeImage(FileImage(File(product.mediaLocalPath)), width: 1280)
           : null;
       final ImageProvider? remoteProvider = hasRemote
-          ? ResizeImage(
-              NetworkImage(product.mediaUrl),
-              width: 1280,
-            )
+          ? ResizeImage(NetworkImage(product.mediaUrl), width: 1280)
           : null;
       content = ClipRRect(
         borderRadius: BorderRadius.circular(10),
@@ -2702,6 +2741,125 @@ class _ShimmerParticlePainter extends CustomPainter {
   }
 }
 
+class _AutoScrollFlashCards extends StatefulWidget {
+  final List<_BeautyProduct> products;
+  final double cardHeight;
+  final double cardWidth;
+  final double cardGap;
+  final double pulse;
+
+  const _AutoScrollFlashCards({
+    required this.products,
+    required this.cardHeight,
+    required this.cardWidth,
+    required this.cardGap,
+    required this.pulse,
+  });
+
+  @override
+  State<_AutoScrollFlashCards> createState() => _AutoScrollFlashCardsState();
+}
+
+class _AutoScrollFlashCardsState extends State<_AutoScrollFlashCards>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+  double _track = 1;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(vsync: this);
+    _reconfigure();
+  }
+
+  @override
+  void didUpdateWidget(covariant _AutoScrollFlashCards oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.products.length != widget.products.length ||
+        (oldWidget.cardWidth - widget.cardWidth).abs() > 0.1 ||
+        (oldWidget.cardGap - widget.cardGap).abs() > 0.1) {
+      _reconfigure();
+    }
+  }
+
+  void _reconfigure() {
+    final baseLoopWidth =
+        (widget.products.length * widget.cardWidth) +
+        ((widget.products.length - 1) * widget.cardGap);
+    _track = baseLoopWidth + widget.cardGap;
+    final pxPerSecond = widget.cardWidth / 3.2;
+    final durationMs = ((_track / pxPerSecond) * 1000)
+        .clamp(7000, 36000)
+        .round();
+    _controller.duration = Duration(milliseconds: durationMs);
+    if (widget.products.isNotEmpty) {
+      _controller.repeat();
+    } else {
+      _controller.stop();
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (widget.products.isEmpty) return const SizedBox.shrink();
+    final renderProducts = <_BeautyProduct>[
+      ...widget.products,
+      ...widget.products,
+    ];
+    final rowWidth =
+        (renderProducts.length * widget.cardWidth) +
+        ((renderProducts.length - 1) * widget.cardGap);
+    return ClipRect(
+      child: AnimatedBuilder(
+        animation: _controller,
+        builder: (context, child) {
+          final x = -(_controller.value * _track);
+          return Stack(
+            fit: StackFit.expand,
+            children: [
+              Positioned(
+                left: x,
+                top: 0,
+                bottom: 0,
+                width: rowWidth,
+                child: child!,
+              ),
+            ],
+          );
+        },
+        child: AnimatedBuilder(
+          animation: const AlwaysStoppedAnimation(0),
+          builder: (context, _) => Row(
+            mainAxisSize: MainAxisSize.min,
+            children: List<Widget>.generate(renderProducts.length, (index) {
+              final item = renderProducts[index];
+              const glow = 0.74;
+              return Padding(
+                padding: EdgeInsets.only(
+                  right: index == renderProducts.length - 1 ? 0 : widget.cardGap,
+                ),
+                child: _BeautyFlashCard(
+                  product: item,
+                  pulse: widget.pulse,
+                  glow: glow,
+                  height: widget.cardHeight,
+                  width: widget.cardWidth,
+                ),
+              );
+            }),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _RunningTextBanner extends StatefulWidget {
   final String text;
   final double height;
@@ -2753,7 +2911,8 @@ class _RunningTextBannerState extends State<_RunningTextBanner>
   void _ensureMetrics(double viewWidth) {
     final normalizedText = widget.text.trim();
     if (normalizedText.isEmpty) return;
-    if (_lastText == normalizedText && (_lastViewWidth - viewWidth).abs() < 0.5) {
+    if (_lastText == normalizedText &&
+        (_lastViewWidth - viewWidth).abs() < 0.5) {
       return;
     }
     final painter = TextPainter(
@@ -2806,4 +2965,3 @@ class _RunningTextBannerState extends State<_RunningTextBanner>
     );
   }
 }
-

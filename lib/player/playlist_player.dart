@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/painting.dart';
 import 'package:video_player/video_player.dart';
 
 import '../models/playback_item.dart';
@@ -24,6 +25,8 @@ class PlaylistPlayer extends StatefulWidget {
 
 class _PlaylistPlayerState extends State<PlaylistPlayer> {
   static const Duration _cacheReadyHold = Duration(seconds: 3);
+  static const int _maxImageDecodeWidth = 960;
+  static const int _minImageDecodeWidth = 640;
 
   int _index = 0;
   Timer? _timer;
@@ -153,6 +156,15 @@ class _PlaylistPlayerState extends State<PlaylistPlayer> {
     return (index + 1) % widget.items.length;
   }
 
+  void _trimImageCache() {
+    // Avoid cache growth spikes when switching many large PNGs.
+    final cache = PaintingBinding.instance.imageCache;
+    if (cache.currentSizeBytes > (64 << 20)) {
+      cache.clear();
+      cache.clearLiveImages();
+    }
+  }
+
   Future<void> _disposeNextController() async {
     final next = _nextVideoController;
     _nextVideoController = null;
@@ -172,7 +184,9 @@ class _PlaylistPlayerState extends State<PlaylistPlayer> {
     if (local.isNotEmpty && File(local).existsSync()) {
       candidates.add(VideoPlayerController.file(File(local)));
     }
-    candidates.add(VideoPlayerController.networkUrl(Uri.parse(item.url)));
+    if (candidates.isEmpty) {
+      return null;
+    }
 
     for (var i = 0; i < candidates.length; i++) {
       final controller = candidates[i];
@@ -279,12 +293,13 @@ class _PlaylistPlayerState extends State<PlaylistPlayer> {
     }
 
     final previous = _videoController;
-    _videoController = null;
-    _videoBoundItemId = null;
-    _index = targetIndex;
-    if (previous != null) {
-      await previous.dispose();
-    }
+      _videoController = null;
+      _videoBoundItemId = null;
+      _index = targetIndex;
+      _trimImageCache();
+      if (previous != null) {
+        await previous.dispose();
+      }
     unawaited(_prewarmNextVideoController(fromIndex: targetIndex));
     return true;
   }
@@ -375,39 +390,47 @@ class _PlaylistPlayerState extends State<PlaylistPlayer> {
         child: CircularProgressIndicator(color: Colors.white),
       );
     } else if (item.type == 'image') {
-      final ImageProvider provider;
-      if (item.localPath != null && item.localPath!.trim().isNotEmpty) {
-        provider = ResizeImage(
-          FileImage(File(item.localPath!)),
-          width: 1920,
+      final local = (item.localPath ?? '').trim();
+      final hasLocal = local.isNotEmpty && File(local).existsSync();
+      if (!hasLocal) {
+        content = const Center(
+          child: Text(
+            'Menunggu cache gambar lokal...',
+            style: TextStyle(color: Colors.white),
+          ),
         );
       } else {
-        provider = ResizeImage(
-          NetworkImage(item.url),
-          width: 1920,
+        final logicalWidth = MediaQuery.sizeOf(context).width;
+        final dpr = MediaQuery.devicePixelRatioOf(context);
+        final requestedDecodeWidth = (logicalWidth * dpr)
+            .round()
+            .clamp(_minImageDecodeWidth, _maxImageDecodeWidth);
+        final provider = ResizeImage(
+          FileImage(File(local)),
+          width: requestedDecodeWidth,
+        );
+        content = SizedBox.expand(
+          child: FittedBox(
+            fit: BoxFit.contain,
+            child: Image(
+              image: provider,
+              filterQuality: FilterQuality.none,
+              errorBuilder: (context, error, stackTrace) {
+                return const SizedBox(
+                  width: 420,
+                  height: 240,
+                  child: Center(
+                    child: Text(
+                      'Gagal memuat gambar',
+                      style: TextStyle(color: Colors.white),
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
         );
       }
-      content = SizedBox.expand(
-        child: FittedBox(
-          fit: BoxFit.contain,
-          child: Image(
-            image: provider,
-            filterQuality: FilterQuality.low,
-            errorBuilder: (context, error, stackTrace) {
-              return const SizedBox(
-                width: 420,
-                height: 240,
-                child: Center(
-                  child: Text(
-                    'Gagal memuat gambar',
-                    style: TextStyle(color: Colors.white),
-                  ),
-                ),
-              );
-            },
-          ),
-        ),
-      );
     } else {
       content = Center(
         child: Text(
@@ -418,8 +441,8 @@ class _PlaylistPlayerState extends State<PlaylistPlayer> {
     }
 
     final transitionMillis = widget.transitionDurationSec.clamp(0, 30) * 1000;
-    // Keep video transition as direct cut to avoid decode+fade spikes.
-    if (transitionMillis <= 0 || item.type == 'video') {
+    // Keep direct cut to avoid holding old+new image/video frames simultaneously.
+    if (transitionMillis <= 0 || item.type == 'video' || item.type == 'image') {
       return SizedBox.expand(
         child: KeyedSubtree(
           key: ValueKey('$_index-${item.id}'),
