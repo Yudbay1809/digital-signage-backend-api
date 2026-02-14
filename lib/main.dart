@@ -4,7 +4,7 @@ import 'dart:io';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
-import 'package:flutter/painting.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:http/http.dart' as http;
@@ -17,19 +17,32 @@ import 'services/api.dart';
 import 'services/cache.dart';
 import 'services/sync.dart';
 
+enum _PerformanceProfile { low, normal, high }
+
+extension on _PerformanceProfile {
+  String get key => switch (this) {
+    _PerformanceProfile.low => 'low',
+    _PerformanceProfile.normal => 'normal',
+    _PerformanceProfile.high => 'high',
+  };
+
+  String get label => switch (this) {
+    _PerformanceProfile.low => 'Low (2GB RAM)',
+    _PerformanceProfile.normal => 'Normal',
+    _PerformanceProfile.high => 'High',
+  };
+}
+
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
   // Keep image cache small on low-end Android signage devices.
-  PaintingBinding.instance.imageCache.maximumSize = 120;
-  PaintingBinding.instance.imageCache.maximumSizeBytes = 80 << 20; // 80 MB
+  PaintingBinding.instance.imageCache.maximumSize = 80;
+  PaintingBinding.instance.imageCache.maximumSizeBytes = 48 << 20; // 48 MB
   _configureGlobalErrorHandling();
-  runZonedGuarded(
-    () => runApp(const SignageApp()),
-    (error, stackTrace) {
-      debugPrint('UNCAUGHT ZONE ERROR: $error');
-      debugPrintStack(stackTrace: stackTrace);
-    },
-  );
+  runZonedGuarded(() => runApp(const SignageApp()), (error, stackTrace) {
+    debugPrint('UNCAUGHT ZONE ERROR: $error');
+    debugPrintStack(stackTrace: stackTrace);
+  });
 }
 
 void _configureGlobalErrorHandling() {
@@ -110,14 +123,23 @@ class PlayerPage extends StatefulWidget {
   State<PlayerPage> createState() => _PlayerPageState();
 }
 
-class _PlayerPageState extends State<PlayerPage> {
+class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
   static const String _defaultServerBaseUrl = '';
   static const bool _strictLocalOnlyPlayback = true;
   static const int _precacheGateMinItems = 2;
+  static const String _prefPerfProfile = 'performance_profile';
+  static const String _prefSessionActive = 'session_active';
+  static const String _prefSessionStartMs = 'session_start_ms';
+  static const String _prefCrashStreak = 'crash_streak';
+  static const int _recoveryCrashThreshold = 3;
+  static const int _recoveryWindowMs = 15 * 60 * 1000;
+  static const int _minImageBytesLow = 6 * 1024 * 1024;
+  static const int _minImageBytesNormal = 12 * 1024 * 1024;
+  static const int _minImageBytesHigh = 20 * 1024 * 1024;
+  static const int _minVideoBytesLow = 70 * 1024 * 1024;
+  static const int _minVideoBytesNormal = 180 * 1024 * 1024;
+  static const int _minVideoBytesHigh = 350 * 1024 * 1024;
   final Duration _heartbeatInterval = const Duration(seconds: 30);
-  final Duration _configPollInterval = const Duration(seconds: 8);
-  final Duration _realtimeSafetyPollInterval = const Duration(seconds: 10);
-  final int _maxCacheBytes = 4 * 1024 * 1024 * 1024; // 4 GB
 
   String _baseUrl = '';
   List<PlaybackItem> _itemsA = const [];
@@ -169,6 +191,8 @@ class _PlayerPageState extends State<PlayerPage> {
   bool _realtimeConnected = false;
   int _lastRealtimeRevision = 0;
   bool _cacheGatePending = false;
+  bool _recoveryMode = false;
+  _PerformanceProfile _performanceProfile = _PerformanceProfile.normal;
   DeviceConfig? _cachedConfig;
   Map<String, String> _cachedLocalMap = const {};
   final ValueNotifier<int> _flashOverlayTick = ValueNotifier<int>(0);
@@ -176,12 +200,143 @@ class _PlayerPageState extends State<PlayerPage> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _cache = CacheService();
     _init();
   }
 
+  int get _maxImageBytes {
+    return switch (_performanceProfile) {
+      _PerformanceProfile.low => _minImageBytesLow,
+      _PerformanceProfile.normal => _minImageBytesNormal,
+      _PerformanceProfile.high => _minImageBytesHigh,
+    };
+  }
+
+  int get _maxVideoBytes {
+    return switch (_performanceProfile) {
+      _PerformanceProfile.low => _minVideoBytesLow,
+      _PerformanceProfile.normal => _minVideoBytesNormal,
+      _PerformanceProfile.high => _minVideoBytesHigh,
+    };
+  }
+
+  int get _maxCacheBytes {
+    if (_recoveryMode) return 512 * 1024 * 1024;
+    return switch (_performanceProfile) {
+      _PerformanceProfile.low => 768 * 1024 * 1024,
+      _PerformanceProfile.normal => 1536 * 1024 * 1024,
+      _PerformanceProfile.high => 4 * 1024 * 1024 * 1024,
+    };
+  }
+
+  int get _minDecodeWidth {
+    if (_recoveryMode) return 360;
+    return switch (_performanceProfile) {
+      _PerformanceProfile.low => 360,
+      _PerformanceProfile.normal => 480,
+      _PerformanceProfile.high => 640,
+    };
+  }
+
+  int get _maxDecodeWidth {
+    if (_recoveryMode) return 640;
+    return switch (_performanceProfile) {
+      _PerformanceProfile.low => 640,
+      _PerformanceProfile.normal => 720,
+      _PerformanceProfile.high => 960,
+    };
+  }
+
+  Duration get _configPollInterval {
+    if (_recoveryMode) return const Duration(seconds: 12);
+    return _performanceProfile == _PerformanceProfile.low
+        ? const Duration(seconds: 10)
+        : const Duration(seconds: 8);
+  }
+
+  Duration get _realtimeSafetyPollInterval {
+    if (_recoveryMode) return const Duration(seconds: 14);
+    return const Duration(seconds: 10);
+  }
+
+  @override
+  void didHaveMemoryPressure() {
+    final cache = PaintingBinding.instance.imageCache;
+    cache.clear();
+    cache.clearLiveImages();
+    // Give decode threads a tiny relief window on memory pressure.
+    SchedulerBinding.instance.scheduleTask(
+      () {},
+      Priority.idle,
+      debugLabel: 'memory-pressure-relief',
+    );
+  }
+
+  _PerformanceProfile _parsePerformanceProfile(String? raw) {
+    return switch ((raw ?? '').trim().toLowerCase()) {
+      'low' => _PerformanceProfile.low,
+      'high' => _PerformanceProfile.high,
+      _ => _PerformanceProfile.normal,
+    };
+  }
+
+  Future<void> _loadRuntimeProfile() async {
+    final prefs = await SharedPreferences.getInstance();
+    final profile = _parsePerformanceProfile(prefs.getString(_prefPerfProfile));
+    if (mounted) {
+      setState(() => _performanceProfile = profile);
+    } else {
+      _performanceProfile = profile;
+    }
+  }
+
+  Future<void> _saveRuntimeProfile(_PerformanceProfile profile) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_prefPerfProfile, profile.key);
+    if (!mounted) {
+      _performanceProfile = profile;
+      return;
+    }
+    setState(() => _performanceProfile = profile);
+    _rebuildServices();
+    _restartSyncTimer();
+  }
+
+  Future<void> _beginCrashGuardSession() async {
+    final prefs = await SharedPreferences.getInstance();
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    final wasActive = prefs.getBool(_prefSessionActive) ?? false;
+    final previousStart = prefs.getInt(_prefSessionStartMs) ?? 0;
+    var streak = prefs.getInt(_prefCrashStreak) ?? 0;
+    if (wasActive) {
+      final withinWindow =
+          previousStart > 0 && (nowMs - previousStart) <= _recoveryWindowMs;
+      streak = withinWindow ? (streak + 1) : 1;
+    } else {
+      streak = 0;
+    }
+    final enabledRecovery = streak >= _recoveryCrashThreshold;
+    await prefs.setBool(_prefSessionActive, true);
+    await prefs.setInt(_prefSessionStartMs, nowMs);
+    await prefs.setInt(_prefCrashStreak, streak);
+    _recoveryMode = enabledRecovery;
+    if (enabledRecovery) {
+      _performanceProfile = _PerformanceProfile.low;
+      await prefs.setString(_prefPerfProfile, _PerformanceProfile.low.key);
+    }
+  }
+
+  Future<void> _endCrashGuardSession() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_prefSessionActive, false);
+    await prefs.setInt(_prefCrashStreak, 0);
+  }
+
   Future<void> _init() async {
     try {
+      await _beginCrashGuardSession();
+      await _loadRuntimeProfile();
       await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
       await WakelockPlus.enable();
 
@@ -231,6 +386,8 @@ class _PlayerPageState extends State<PlayerPage> {
 
   @override
   void dispose() {
+    unawaited(_endCrashGuardSession());
+    WidgetsBinding.instance.removeObserver(this);
     _heartbeatTimer?.cancel();
     _syncTimer?.cancel();
     _timelineEvalTimer?.cancel();
@@ -488,6 +645,8 @@ class _PlayerPageState extends State<PlayerPage> {
       baseUrl: _baseUrl,
       cache: _cache,
       maxCacheBytes: _maxCacheBytes,
+      maxImageBytes: _maxImageBytes,
+      maxVideoBytes: _maxVideoBytes,
     );
   }
 
@@ -618,6 +777,7 @@ class _PlayerPageState extends State<PlayerPage> {
     final nameController = TextEditingController(text: _deviceName);
     final locationController = TextEditingController(text: _deviceLocation);
     final baseUrlController = TextEditingController(text: _baseUrl);
+    var selectedProfile = _performanceProfile;
 
     await showDialog<void>(
       context: context,
@@ -650,6 +810,25 @@ class _PlayerPageState extends State<PlayerPage> {
                       decoration: const InputDecoration(
                         labelText: 'Base URL Server',
                       ),
+                    ),
+                    const SizedBox(height: 8),
+                    DropdownButtonFormField<_PerformanceProfile>(
+                      initialValue: selectedProfile,
+                      decoration: const InputDecoration(
+                        labelText: 'Performance Profile',
+                      ),
+                      items: _PerformanceProfile.values
+                          .map(
+                            (profile) => DropdownMenuItem<_PerformanceProfile>(
+                              value: profile,
+                              child: Text(profile.label),
+                            ),
+                          )
+                          .toList(),
+                      onChanged: (value) {
+                        if (value == null) return;
+                        setLocalState(() => selectedProfile = value);
+                      },
                     ),
                     const SizedBox(height: 8),
                     Align(
@@ -711,6 +890,7 @@ class _PlayerPageState extends State<PlayerPage> {
                       await prefs.setString('device_name', _deviceName);
                       await prefs.setString('device_location', _deviceLocation);
                       await prefs.setString('base_url', _baseUrl);
+                      await _saveRuntimeProfile(selectedProfile);
                       _rebuildServices();
 
                       if (_deviceId == null || _deviceId!.isEmpty) {
@@ -818,7 +998,9 @@ class _PlayerPageState extends State<PlayerPage> {
       }
       await _syncFromServer(force: true, setLoadingFalse: true);
       _startTimers();
-      _startRealtimeChannel();
+      if (!_recoveryMode) {
+        _startRealtimeChannel();
+      }
     } catch (e) {
       if (_looksLikeDeviceNotFoundError(e)) {
         await _switchToRegistrationRequired(
@@ -960,6 +1142,18 @@ class _PlayerPageState extends State<PlayerPage> {
     }
   }
 
+  bool _isMediaAllowed(MediaItem media) {
+    final mediaType = media.type.trim().toLowerCase();
+    final size = media.sizeBytes ?? 0;
+    if (mediaType == 'image') {
+      return size <= 0 || size <= _maxImageBytes;
+    }
+    if (mediaType == 'video') {
+      return size <= 0 || size <= _maxVideoBytes;
+    }
+    return false;
+  }
+
   bool _isPlaylistCacheReady(
     DeviceConfig cfg,
     Map<String, String> localMap,
@@ -972,9 +1166,16 @@ class _PlayerPageState extends State<PlayerPage> {
     );
     if (target.items.isEmpty) return true;
 
-    final requiredReady = math.min(_precacheGateMinItems, target.items.length);
+    final mediaById = <String, MediaItem>{for (final m in cfg.media) m.id: m};
+    final allowedItems = target.items.where((item) {
+      final media = mediaById[item.mediaId];
+      if (media == null) return false;
+      return _isMediaAllowed(media);
+    }).toList();
+    if (allowedItems.isEmpty) return true;
+    final requiredReady = math.min(_precacheGateMinItems, allowedItems.length);
     var readyCount = 0;
-    for (final item in target.items) {
+    for (final item in allowedItems) {
       final local = localMap[item.mediaId];
       if (_localFileExists(local)) {
         readyCount += 1;
@@ -1293,7 +1494,7 @@ class _PlayerPageState extends State<PlayerPage> {
         config.media
             .map(
               (m) =>
-                  '${m.id}|${m.type}|${m.path}|${m.checksum}|${m.durationSec ?? 0}',
+                  '${m.id}|${m.type}|${m.path}|${m.checksum}|${m.durationSec ?? 0}|${m.sizeBytes ?? 0}',
             )
             .toList()
           ..sort();
@@ -1364,6 +1565,9 @@ class _PlayerPageState extends State<PlayerPage> {
     for (final item in playlist.items) {
       final media = mediaById[item.mediaId];
       if (media == null) {
+        continue;
+      }
+      if (!_isMediaAllowed(media)) {
         continue;
       }
       final duration = item.durationSec ?? media.durationSec ?? 10;
@@ -1677,6 +1881,8 @@ class _PlayerPageState extends State<PlayerPage> {
         items: _itemsA,
         syncKey: _syncKeyA,
         transitionDurationSec: _transitionDurationSecA,
+        minImageDecodeWidth: _minDecodeWidth,
+        maxImageDecodeWidth: _maxDecodeWidth,
       );
     }
     return LayoutBuilder(
@@ -1719,6 +1925,8 @@ class _PlayerPageState extends State<PlayerPage> {
                 items: cellItems,
                 syncKey: '$_syncKeyA-grid-$index',
                 transitionDurationSec: _transitionDurationSecA,
+                minImageDecodeWidth: _minDecodeWidth,
+                maxImageDecodeWidth: _maxDecodeWidth,
               ),
             );
           },
@@ -2346,6 +2554,32 @@ class _PlayerPageState extends State<PlayerPage> {
                 valueListenable: _flashOverlayTick,
                 builder: (context, tick, child) => _buildFlashSaleOverlay(),
               ),
+              if (_recoveryMode)
+                Positioned(
+                  top: 10,
+                  right: 10,
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: const Color(0xCC7C2D12),
+                      borderRadius: BorderRadius.circular(999),
+                      border: Border.all(color: const Color(0xCCFDBA74)),
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 6,
+                      ),
+                      child: Text(
+                        'Recovery Mode',
+                        style: GoogleFonts.poppins(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
+                          color: const Color(0xFFFFEDD5),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
             ],
           ),
         ),
@@ -2623,51 +2857,27 @@ class _FlashSaleProductMediaPreview extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final hasLocal = product.mediaLocalPath.trim().isNotEmpty;
-    final hasRemote = product.mediaUrl.trim().isNotEmpty;
     final isImage = product.mediaType == 'image';
-    final hasPreview = isImage && (hasLocal || hasRemote);
+    final hasPreview = isImage && hasLocal;
 
     Widget content;
     if (hasPreview) {
-      final ImageProvider? localProvider = hasLocal
-          ? ResizeImage(FileImage(File(product.mediaLocalPath)), width: 1280)
-          : null;
-      final ImageProvider? remoteProvider = hasRemote
-          ? ResizeImage(NetworkImage(product.mediaUrl), width: 1280)
-          : null;
+      final localFile = File(product.mediaLocalPath);
+      final ImageProvider localProvider = ResizeImage(
+        FileImage(localFile),
+        width: 360,
+      );
       content = ClipRRect(
         borderRadius: BorderRadius.circular(10),
-        child: hasLocal
-            ? Image(
-                image: localProvider!,
-                fit: BoxFit.cover,
-                width: double.infinity,
-                height: double.infinity,
-                filterQuality: FilterQuality.low,
-                errorBuilder: (context, error, stackTrace) {
-                  if (hasRemote) {
-                    return Image(
-                      image: remoteProvider!,
-                      fit: BoxFit.cover,
-                      width: double.infinity,
-                      height: double.infinity,
-                      filterQuality: FilterQuality.low,
-                      errorBuilder: (context, error, stackTrace) =>
-                          _placeholder('Gagal memuat gambar'),
-                    );
-                  }
-                  return _placeholder('Gagal memuat gambar');
-                },
-              )
-            : Image(
-                image: remoteProvider!,
-                fit: BoxFit.cover,
-                width: double.infinity,
-                height: double.infinity,
-                filterQuality: FilterQuality.low,
-                errorBuilder: (context, error, stackTrace) =>
-                    _placeholder('Gagal memuat gambar'),
-              ),
+        child: Image(
+          image: localProvider,
+          fit: BoxFit.cover,
+          width: double.infinity,
+          height: double.infinity,
+          filterQuality: FilterQuality.none,
+          errorBuilder: (context, error, stackTrace) =>
+              _placeholder('Gagal memuat gambar'),
+        ),
       );
     } else if (product.mediaType == 'video') {
       content = Column(
@@ -2842,7 +3052,9 @@ class _AutoScrollFlashCardsState extends State<_AutoScrollFlashCards>
               const glow = 0.74;
               return Padding(
                 padding: EdgeInsets.only(
-                  right: index == renderProducts.length - 1 ? 0 : widget.cardGap,
+                  right: index == renderProducts.length - 1
+                      ? 0
+                      : widget.cardGap,
                 ),
                 child: _BeautyFlashCard(
                   product: item,

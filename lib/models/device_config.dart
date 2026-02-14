@@ -4,6 +4,7 @@ class MediaItem {
   final String path;
   final String checksum;
   final int? durationSec;
+  final int? sizeBytes;
 
   const MediaItem({
     required this.id,
@@ -11,6 +12,7 @@ class MediaItem {
     required this.path,
     required this.checksum,
     this.durationSec,
+    this.sizeBytes,
   });
 }
 

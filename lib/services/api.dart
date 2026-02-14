@@ -85,6 +85,7 @@ class ApiService {
         path: m['path'],
         checksum: m['checksum'],
         durationSec: m['duration_sec'],
+        sizeBytes: (m['size'] as num?)?.toInt(),
       );
     }).toList();
 

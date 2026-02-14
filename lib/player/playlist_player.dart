@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/painting.dart';
 import 'package:video_player/video_player.dart';
 
 import '../models/playback_item.dart';
@@ -11,12 +10,16 @@ class PlaylistPlayer extends StatefulWidget {
   final List<PlaybackItem> items;
   final String syncKey;
   final int transitionDurationSec;
+  final int minImageDecodeWidth;
+  final int maxImageDecodeWidth;
 
   const PlaylistPlayer({
     super.key,
     required this.items,
     required this.syncKey,
     this.transitionDurationSec = 1,
+    this.minImageDecodeWidth = 480,
+    this.maxImageDecodeWidth = 720,
   });
 
   @override
@@ -25,8 +28,6 @@ class PlaylistPlayer extends StatefulWidget {
 
 class _PlaylistPlayerState extends State<PlaylistPlayer> {
   static const Duration _cacheReadyHold = Duration(seconds: 3);
-  static const int _maxImageDecodeWidth = 960;
-  static const int _minImageDecodeWidth = 640;
 
   int _index = 0;
   Timer? _timer;
@@ -75,7 +76,10 @@ class _PlaylistPlayerState extends State<PlaylistPlayer> {
 
   void _startSyncLoop() {
     _timer?.cancel();
-    _timer = Timer.periodic(const Duration(seconds: 1), (_) => _syncToTimeline());
+    _timer = Timer.periodic(
+      const Duration(seconds: 1),
+      (_) => _syncToTimeline(),
+    );
     _syncToTimeline(force: true);
   }
 
@@ -104,20 +108,12 @@ class _PlaylistPlayerState extends State<PlaylistPlayer> {
       final span = durations[i];
       if (phase < cursor + span) {
         final offset = phase - cursor;
-        return (
-          index: i,
-          offsetSec: offset,
-          remainingSec: span - offset,
-        );
+        return (index: i, offsetSec: offset, remainingSec: span - offset);
       }
       cursor += span;
     }
 
-    return (
-      index: 0,
-      offsetSec: 0,
-      remainingSec: durations.first,
-    );
+    return (index: 0, offsetSec: 0, remainingSec: durations.first);
   }
 
   bool _hasLocalFile(PlaybackItem item) {
@@ -157,9 +153,9 @@ class _PlaylistPlayerState extends State<PlaylistPlayer> {
   }
 
   void _trimImageCache() {
-    // Avoid cache growth spikes when switching many large PNGs.
+    // Aggressive trim to survive low-RAM Android devices.
     final cache = PaintingBinding.instance.imageCache;
-    if (cache.currentSizeBytes > (64 << 20)) {
+    if (cache.currentSizeBytes > (32 << 20)) {
       cache.clear();
       cache.clearLiveImages();
     }
@@ -293,13 +289,13 @@ class _PlaylistPlayerState extends State<PlaylistPlayer> {
     }
 
     final previous = _videoController;
-      _videoController = null;
-      _videoBoundItemId = null;
-      _index = targetIndex;
-      _trimImageCache();
-      if (previous != null) {
-        await previous.dispose();
-      }
+    _videoController = null;
+    _videoBoundItemId = null;
+    _index = targetIndex;
+    _trimImageCache();
+    if (previous != null) {
+      await previous.dispose();
+    }
     unawaited(_prewarmNextVideoController(fromIndex: targetIndex));
     return true;
   }
@@ -327,11 +323,15 @@ class _PlaylistPlayerState extends State<PlaylistPlayer> {
         return;
       }
 
-      final mustPrepare = force ||
+      final mustPrepare =
+          force ||
           switchingIndex ||
           (_videoController == null && _current.type == 'video');
       if (mustPrepare) {
-        final prepared = await _prepareIndexAtOffset(targetIndex, snap.offsetSec);
+        final prepared = await _prepareIndexAtOffset(
+          targetIndex,
+          snap.offsetSec,
+        );
         if (prepared && mounted) {
           setState(() {});
         }
@@ -402,18 +402,16 @@ class _PlaylistPlayerState extends State<PlaylistPlayer> {
       } else {
         final logicalWidth = MediaQuery.sizeOf(context).width;
         final dpr = MediaQuery.devicePixelRatioOf(context);
-        final requestedDecodeWidth = (logicalWidth * dpr)
-            .round()
-            .clamp(_minImageDecodeWidth, _maxImageDecodeWidth);
-        final provider = ResizeImage(
-          FileImage(File(local)),
-          width: requestedDecodeWidth,
+        final requestedDecodeWidth = (logicalWidth * dpr).round().clamp(
+          widget.minImageDecodeWidth,
+          widget.maxImageDecodeWidth,
         );
         content = SizedBox.expand(
           child: FittedBox(
             fit: BoxFit.contain,
-            child: Image(
-              image: provider,
+            child: Image.file(
+              File(local),
+              cacheWidth: requestedDecodeWidth,
               filterQuality: FilterQuality.none,
               errorBuilder: (context, error, stackTrace) {
                 return const SizedBox(
@@ -441,8 +439,21 @@ class _PlaylistPlayerState extends State<PlaylistPlayer> {
     }
 
     final transitionMillis = widget.transitionDurationSec.clamp(0, 30) * 1000;
-    // Keep direct cut to avoid holding old+new image/video frames simultaneously.
-    if (transitionMillis <= 0 || item.type == 'video' || item.type == 'image') {
+    // Keep video direct-cut for stability on low-end devices.
+    if (item.type == 'video') {
+      return SizedBox.expand(
+        child: KeyedSubtree(
+          key: ValueKey('$_index-${item.id}'),
+          child: content,
+        ),
+      );
+    }
+
+    // Lightweight image fade only (150-250ms) to keep transition smooth.
+    final effectiveTransitionMillis = item.type == 'image'
+        ? (transitionMillis <= 0 ? 200 : transitionMillis.clamp(150, 250))
+        : transitionMillis;
+    if (effectiveTransitionMillis <= 0) {
       return SizedBox.expand(
         child: KeyedSubtree(
           key: ValueKey('$_index-${item.id}'),
@@ -453,7 +464,7 @@ class _PlaylistPlayerState extends State<PlaylistPlayer> {
 
     return SizedBox.expand(
       child: AnimatedSwitcher(
-        duration: Duration(milliseconds: transitionMillis),
+        duration: Duration(milliseconds: effectiveTransitionMillis),
         switchInCurve: Curves.easeInOut,
         switchOutCurve: Curves.easeInOut,
         transitionBuilder: (child, animation) =>

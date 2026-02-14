@@ -13,7 +13,12 @@ This app is designed for unattended screens with playlist sync, local caching, a
 - Verified end-to-end against backend final contract (`/devices/{id}/config`, websocket refresh flow).
 - Player works with normalized media URL path from backend (`/storage/media/<file>`).
 
-## Latest Updates (2026-02-13)
+## Latest Updates (2026-02-14)
+- Added `Media Guard` to skip oversized media safely on mobile playback.
+- Added `Crash Recovery Mode` for repeated startup-crash scenarios (auto fallback to low profile).
+- Added per-device `Performance Profile` (`low/normal/high`) in player settings.
+- Image transition restored with lightweight fade only (`150-250ms`); video remains direct-cut for stability.
+- Android release build warnings from Kotlin incremental cache were resolved via Gradle properties tuning.
 - Realtime sync is less aggressive: websocket messages are filtered/debounced and heartbeat mutation noise is ignored.
 - Playback transition stability improved with prewarm + cache-ready switching strategy.
 - Video transition path now avoids heavy fade composition to reduce frame drop risk.
