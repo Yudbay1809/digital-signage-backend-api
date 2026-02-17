@@ -1103,6 +1103,17 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
     _mediaSyncInProgress = true;
     try {
       final localMap = await _sync.syncMedia(config.media);
+      final deviceId = _deviceId;
+      if (deviceId != null && deviceId.isNotEmpty) {
+        try {
+          await _api.reportMediaCache(
+            deviceId: deviceId,
+            mediaIds: localMap.keys,
+          );
+        } catch (_) {
+          // Keep playback and sync running even if report fails.
+        }
+      }
       if (!mounted) return;
       final mediaBindingChanged = _hasActiveMediaBindingChanged(localMap);
       _cachedLocalMap = localMap;

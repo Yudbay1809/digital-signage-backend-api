@@ -13,7 +13,11 @@ This app is designed for unattended screens with playlist sync, local caching, a
 - Verified end-to-end against backend final contract (`/devices/{id}/config`, websocket refresh flow).
 - Player works with normalized media URL path from backend (`/storage/media/<file>`).
 
-## Latest Updates (2026-02-14)
+## Latest Updates (2026-02-17)
+- Device now reports local cached media IDs to backend after sync (`/devices/{id}/media-cache-report`).
+- This enables CMS to verify whether each device has completed media download.
+- Existing playback optimizations (prewarm, cache-ready switch, light image transition) remain active.
+- Previous updates:
 - Added `Media Guard` to skip oversized media safely on mobile playback.
 - Added `Crash Recovery Mode` for repeated startup-crash scenarios (auto fallback to low profile).
 - Added per-device `Performance Profile` (`low/normal/high`) in player settings.

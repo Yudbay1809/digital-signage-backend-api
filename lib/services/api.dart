@@ -172,6 +172,28 @@ class ApiService {
     }
   }
 
+  Future<void> reportMediaCache({
+    required String deviceId,
+    required Iterable<String> mediaIds,
+  }) async {
+    final normalized = mediaIds
+        .map((id) => id.trim())
+        .where((id) => id.isNotEmpty)
+        .toSet()
+        .toList()
+      ..sort();
+    final res = await _sendWithRetry(
+      () => http.post(
+        _uri('/devices/$deviceId/media-cache-report'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode(normalized),
+      ),
+    );
+    if (res.statusCode != 200) {
+      throw Exception('Report media cache failed: ${res.statusCode}');
+    }
+  }
+
   Future<void> updateDeviceOrientation({
     required String deviceId,
     required String orientation,
