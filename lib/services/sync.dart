@@ -4,6 +4,20 @@ import 'package:http/http.dart' as http;
 import '../models/device_config.dart';
 import 'cache.dart';
 
+class SyncRunResult {
+  final Map<String, String> localMap;
+  final List<String> completedIds;
+  final List<Map<String, dynamic>> failedItems;
+  final int downloadedBytes;
+
+  const SyncRunResult({
+    required this.localMap,
+    required this.completedIds,
+    required this.failedItems,
+    required this.downloadedBytes,
+  });
+}
+
 class SyncService {
   final String baseUrl;
   final CacheService cache;
@@ -45,8 +59,17 @@ class SyncService {
     throw Exception('Download failed: $lastError');
   }
 
-  Future<Map<String, String>> syncMedia(List<MediaItem> media) async {
+  Future<SyncRunResult> syncMediaDetailed(
+    List<MediaItem> media, {
+    void Function(int done, int total, MediaItem item)? onItemProcessed,
+  }) async {
     final result = <String, String>{};
+    final completedIds = <String>[];
+    final failedItems = <Map<String, dynamic>>[];
+    var downloadedBytes = 0;
+    var done = 0;
+    final total = media.length;
+
     for (final m in media) {
       final size = m.sizeBytes ?? 0;
       final isImage = m.type == 'image';
@@ -58,6 +81,13 @@ class SyncService {
             stale.deleteSync();
           } catch (_) {}
         }
+        failedItems.add({
+          'media_id': m.id,
+          'error': 'image_too_large',
+          'retry_count': 0,
+        });
+        done += 1;
+        onItemProcessed?.call(done, total, m);
         continue;
       }
       if (isVideo && size > maxVideoBytes) {
@@ -67,6 +97,13 @@ class SyncService {
             stale.deleteSync();
           } catch (_) {}
         }
+        failedItems.add({
+          'media_id': m.id,
+          'error': 'video_too_large',
+          'retry_count': 0,
+        });
+        done += 1;
+        onItemProcessed?.call(done, total, m);
         continue;
       }
       final file = await cache.getFileForPath(m.path);
@@ -76,9 +113,24 @@ class SyncService {
           : file.existsSync();
       if (!ok) {
         final url = _absoluteUrl(m.path);
-        final res = await _downloadWithRetry(Uri.parse(url));
-        if (res.statusCode == 200) {
-          await file.writeAsBytes(res.bodyBytes, flush: true);
+        try {
+          final res = await _downloadWithRetry(Uri.parse(url));
+          if (res.statusCode == 200) {
+            await file.writeAsBytes(res.bodyBytes, flush: true);
+            downloadedBytes += (m.sizeBytes ?? res.bodyBytes.length);
+          } else {
+            failedItems.add({
+              'media_id': m.id,
+              'error': 'http_${res.statusCode}',
+              'retry_count': 0,
+            });
+          }
+        } catch (error) {
+          failedItems.add({
+            'media_id': m.id,
+            'error': error.toString(),
+            'retry_count': 0,
+          });
         }
       }
       final validAfter = hasChecksum
@@ -86,14 +138,35 @@ class SyncService {
           : file.existsSync();
       if (validAfter && file.existsSync()) {
         result[m.id] = file.path;
+        completedIds.add(m.id);
       } else if (file.existsSync()) {
         try {
           file.deleteSync();
         } catch (_) {}
+        if (!failedItems.any((row) => row['media_id'] == m.id)) {
+          failedItems.add({
+            'media_id': m.id,
+            'error': 'checksum_invalid_after_download',
+            'retry_count': 0,
+          });
+        }
       }
+      done += 1;
+      onItemProcessed?.call(done, total, m);
     }
+
     await cache.cleanupCache(maxCacheBytes);
-    return result;
+    return SyncRunResult(
+      localMap: result,
+      completedIds: completedIds,
+      failedItems: failedItems,
+      downloadedBytes: downloadedBytes,
+    );
+  }
+
+  Future<Map<String, String>> syncMedia(List<MediaItem> media) async {
+    final run = await syncMediaDetailed(media);
+    return run.localMap;
   }
 
   String _absoluteUrl(String path) {

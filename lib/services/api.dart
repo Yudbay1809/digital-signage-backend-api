@@ -194,6 +194,74 @@ class ApiService {
     }
   }
 
+  Future<Map<String, dynamic>> fetchSyncPlan(String deviceId) async {
+    final res = await _sendWithRetry(
+      () => http.get(_uri('/devices/$deviceId/sync-plan')),
+    );
+    if (res.statusCode != 200) {
+      throw Exception('Fetch sync plan failed: ${res.statusCode}');
+    }
+    return jsonDecode(res.body) as Map<String, dynamic>;
+  }
+
+  Future<Map<String, dynamic>> reportSyncProgress({
+    required String deviceId,
+    required String planRevision,
+    required String queueStatus,
+    required int downloadedBytes,
+    required int totalBytes,
+    required List<String> completedIds,
+    required List<Map<String, dynamic>> failedItems,
+    String? currentMediaId,
+    int? etaSec,
+  }) async {
+    final query = <String, String>{
+      'plan_revision': planRevision,
+      'queue_status': queueStatus,
+      'downloaded_bytes': '$downloadedBytes',
+      'total_bytes': '$totalBytes',
+    };
+    if (currentMediaId != null && currentMediaId.trim().isNotEmpty) {
+      query['current_media_id'] = currentMediaId.trim();
+    }
+    if (etaSec != null && etaSec >= 0) {
+      query['eta_sec'] = '$etaSec';
+    }
+    final body = {
+      'completed_ids': completedIds,
+      'failed_items': failedItems,
+    };
+    final res = await _sendWithRetry(
+      () => http.post(
+        _uri('/devices/$deviceId/sync-progress', query),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode(body),
+      ),
+    );
+    if (res.statusCode != 200) {
+      throw Exception('Report sync progress failed: ${res.statusCode}');
+    }
+    return jsonDecode(res.body) as Map<String, dynamic>;
+  }
+
+  Future<Map<String, dynamic>> ackSyncReady({
+    required String deviceId,
+    required String planRevision,
+  }) async {
+    final res = await _sendWithRetry(
+      () => http.post(
+        _uri('/devices/$deviceId/sync-ack', {
+          'plan_revision': planRevision,
+          'queue_status': 'ready',
+        }),
+      ),
+    );
+    if (res.statusCode != 200) {
+      throw Exception('Sync ack failed: ${res.statusCode}');
+    }
+    return jsonDecode(res.body) as Map<String, dynamic>;
+  }
+
   Future<void> updateDeviceOrientation({
     required String deviceId,
     required String orientation,

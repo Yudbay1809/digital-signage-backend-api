@@ -1102,9 +1102,71 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
     if (_mediaSyncInProgress) return;
     _mediaSyncInProgress = true;
     try {
-      final localMap = await _sync.syncMedia(config.media);
+      Map<String, dynamic>? plan;
       final deviceId = _deviceId;
       if (deviceId != null && deviceId.isNotEmpty) {
+        try {
+          plan = await _api.fetchSyncPlan(deviceId);
+        } catch (_) {
+          plan = null;
+        }
+      }
+
+      final mediaForSync = _orderedMediaForSyncPlan(config, plan);
+      final totalBytes = _syncPlanDownloadBytes(plan, mediaForSync);
+      final planRevision = (plan?['plan_revision'] ?? '').toString().trim();
+
+      final syncResult = await _sync.syncMediaDetailed(
+        mediaForSync,
+        onItemProcessed: (done, total, item) {
+          final activeDeviceId = _deviceId;
+          if (activeDeviceId == null ||
+              activeDeviceId.isEmpty ||
+              planRevision.isEmpty) {
+            return;
+          }
+          final queueStatus = done >= total ? 'verifying' : 'downloading';
+          unawaited(
+            _api.reportSyncProgress(
+              deviceId: activeDeviceId,
+              planRevision: planRevision,
+              queueStatus: queueStatus,
+              downloadedBytes: syncResultDownloadedBytesHint(done, total, totalBytes),
+              totalBytes: totalBytes,
+              currentMediaId: item.id,
+              completedIds: const [],
+              failedItems: const [],
+            ),
+          );
+        },
+      );
+
+      final localMap = syncResult.localMap;
+      if (deviceId != null && deviceId.isNotEmpty) {
+        if (planRevision.isNotEmpty) {
+          final nextStatus = syncResult.failedItems.isEmpty
+              ? 'verifying'
+              : 'partial_ready';
+          try {
+            await _api.reportSyncProgress(
+              deviceId: deviceId,
+              planRevision: planRevision,
+              queueStatus: nextStatus,
+              downloadedBytes: syncResult.downloadedBytes,
+              totalBytes: totalBytes,
+              completedIds: syncResult.completedIds,
+              failedItems: syncResult.failedItems,
+            );
+            if (syncResult.failedItems.isEmpty) {
+              await _api.ackSyncReady(
+                deviceId: deviceId,
+                planRevision: planRevision,
+              );
+            }
+          } catch (_) {
+            // Keep playback and sync running even if sync status report fails.
+          }
+        }
         try {
           await _api.reportMediaCache(
             deviceId: deviceId,
@@ -1131,6 +1193,55 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
     } finally {
       _mediaSyncInProgress = false;
     }
+  }
+
+  int syncResultDownloadedBytesHint(int done, int total, int totalBytes) {
+    if (total <= 0 || totalBytes <= 0) return 0;
+    final ratio = done / total;
+    return (totalBytes * ratio).round();
+  }
+
+  int _syncPlanDownloadBytes(
+    Map<String, dynamic>? plan,
+    List<MediaItem> resolvedMedia,
+  ) {
+    final summary = plan?['summary'];
+    if (summary is Map) {
+      final raw = summary['download_bytes'];
+      if (raw is num && raw.toInt() >= 0) return raw.toInt();
+    }
+    var fallback = 0;
+    for (final item in resolvedMedia) {
+      fallback += (item.sizeBytes ?? 0);
+    }
+    return fallback;
+  }
+
+  List<MediaItem> _orderedMediaForSyncPlan(
+    DeviceConfig config,
+    Map<String, dynamic>? plan,
+  ) {
+    final byId = <String, MediaItem>{for (final m in config.media) m.id: m};
+    final items = (plan?['items'] as List?) ?? const [];
+    if (items.isEmpty) return config.media;
+
+    final ordered = <MediaItem>[];
+    final added = <String>{};
+    for (final raw in items) {
+      if (raw is! Map) continue;
+      final mediaId = (raw['media_id'] ?? '').toString().trim();
+      if (mediaId.isEmpty || added.contains(mediaId)) continue;
+      final media = byId[mediaId];
+      if (media == null) continue;
+      ordered.add(media);
+      added.add(mediaId);
+    }
+    for (final media in config.media) {
+      if (!added.contains(media.id)) {
+        ordered.add(media);
+      }
+    }
+    return ordered;
   }
 
   bool _hasActiveMediaBindingChanged(Map<String, String> nextLocalMap) {
