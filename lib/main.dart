@@ -2978,21 +2978,24 @@ class _FlashSaleProductMediaPreview extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final hasLocal = product.mediaLocalPath.trim().isNotEmpty;
+    final localPath = product.mediaLocalPath.trim();
+    final hasLocalPath = localPath.isNotEmpty;
+    final hasLocal = hasLocalPath && File(localPath).existsSync();
+    final hasLinkedMedia =
+        product.mediaType.trim().isNotEmpty || product.mediaUrl.trim().isNotEmpty;
     final isImage = product.mediaType == 'image';
-    final hasPreview = isImage && hasLocal;
+    final hasRemotePreview = isImage && product.mediaUrl.trim().isNotEmpty;
+    final hasPreview = isImage && (hasLocal || hasRemotePreview);
 
     Widget content;
     if (hasPreview) {
-      final localFile = File(product.mediaLocalPath);
-      final ImageProvider localProvider = ResizeImage(
-        FileImage(localFile),
-        width: 360,
-      );
+      final ImageProvider previewProvider = hasLocal
+          ? ResizeImage(FileImage(File(localPath)), width: 360)
+          : ResizeImage(NetworkImage(product.mediaUrl.trim()), width: 360);
       content = ClipRRect(
         borderRadius: BorderRadius.circular(10),
         child: Image(
-          image: localProvider,
+          image: previewProvider,
           fit: BoxFit.cover,
           width: double.infinity,
           height: double.infinity,
@@ -3008,7 +3011,7 @@ class _FlashSaleProductMediaPreview extends StatelessWidget {
           const Icon(Icons.ondemand_video, size: 20, color: Color(0xFFDB2777)),
           const SizedBox(height: 2),
           Text(
-            'Video Product',
+            hasLocal ? 'Video Product' : 'Sedang menyiapkan video...',
             style: GoogleFonts.poppins(
               fontSize: 10,
               color: const Color(0xFF9F1239),
@@ -3017,6 +3020,8 @@ class _FlashSaleProductMediaPreview extends StatelessWidget {
           ),
         ],
       );
+    } else if (hasLinkedMedia && !hasLocal) {
+      content = _placeholder('Sedang menyiapkan media...');
     } else {
       content = _placeholder('Media belum dipilih');
     }
