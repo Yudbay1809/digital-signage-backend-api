@@ -126,13 +126,19 @@ class PlayerPage extends StatefulWidget {
 class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
   static const String _defaultServerBaseUrl = '';
   static const bool _strictLocalOnlyPlayback = true;
-  static const int _precacheGateMinItems = 2;
+  static const int _precacheGateNormalMinItems = 2;
+  static const double _precacheGateNormalRatio = 0.7;
   static const String _prefPerfProfile = 'performance_profile';
   static const String _prefSessionActive = 'session_active';
   static const String _prefSessionStartMs = 'session_start_ms';
   static const String _prefCrashStreak = 'crash_streak';
+  static const String _prefLastUnstableAtMs = 'last_unstable_at_ms';
   static const int _recoveryCrashThreshold = 3;
   static const int _recoveryWindowMs = 15 * 60 * 1000;
+  static const int _crashLoopUptimeCeilingMs = 2 * 60 * 1000;
+  static const int _autoExitRecoveryAfterMs = 10 * 60 * 1000;
+  static const int _autoPromoteLowToNormalAfterMs = 30 * 60 * 1000;
+  static const int _autoPromoteNormalToHighAfterMs = 6 * 60 * 60 * 1000;
   static const int _minImageBytesLow = 6 * 1024 * 1024;
   static const int _minImageBytesNormal = 12 * 1024 * 1024;
   static const int _minImageBytesHigh = 20 * 1024 * 1024;
@@ -181,6 +187,7 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
   Timer? _syncTimer;
   Timer? _timelineEvalTimer;
   Timer? _flashOverlayTimer;
+  Timer? _autoProfileTimer;
   Timer? _realtimeReconnectTimer;
   Timer? _realtimePingTimer;
   Timer? _realtimeSyncDebounce;
@@ -191,6 +198,8 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
   bool _realtimeConnected = false;
   int _lastRealtimeRevision = 0;
   bool _cacheGatePending = false;
+  String? _lastCacheGateNoticeKey;
+  DateTime? _lastCacheGateNoticeAt;
   bool _recoveryMode = false;
   _PerformanceProfile _performanceProfile = _PerformanceProfile.normal;
   DeviceConfig? _cachedConfig;
@@ -242,10 +251,26 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
   int get _maxDecodeWidth {
     if (_recoveryMode) return 640;
     return switch (_performanceProfile) {
-      _PerformanceProfile.low => 640,
-      _PerformanceProfile.normal => 720,
-      _PerformanceProfile.high => 960,
+      _PerformanceProfile.low => 960,
+      _PerformanceProfile.normal => 1280,
+      _PerformanceProfile.high => 1920,
     };
+  }
+
+  bool get _flashSaleDecodeBoostAllowed => _flashSaleActiveA && !_recoveryMode;
+
+  int get _effectiveMinDecodeWidth {
+    if (_flashSaleDecodeBoostAllowed) {
+      return math.max(_minDecodeWidth, 480);
+    }
+    return _minDecodeWidth;
+  }
+
+  int get _effectiveMaxDecodeWidth {
+    if (_flashSaleDecodeBoostAllowed) {
+      return math.max(_maxDecodeWidth, 1280);
+    }
+    return _maxDecodeWidth;
   }
 
   Duration get _configPollInterval {
@@ -310,9 +335,18 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
     final previousStart = prefs.getInt(_prefSessionStartMs) ?? 0;
     var streak = prefs.getInt(_prefCrashStreak) ?? 0;
     if (wasActive) {
+      final previousUptimeMs = previousStart > 0 ? (nowMs - previousStart) : 0;
       final withinWindow =
           previousStart > 0 && (nowMs - previousStart) <= _recoveryWindowMs;
-      streak = withinWindow ? (streak + 1) : 1;
+      final looksLikeCrashLoop =
+          withinWindow && previousUptimeMs > 0 && previousUptimeMs <= _crashLoopUptimeCeilingMs;
+      if (looksLikeCrashLoop) {
+        streak = streak + 1;
+        await prefs.setInt(_prefLastUnstableAtMs, nowMs);
+      } else {
+        // Session sebelumnya cukup lama atau di luar window; jangan dianggap crash loop.
+        streak = 0;
+      }
     } else {
       streak = 0;
     }
@@ -324,6 +358,9 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
     if (enabledRecovery) {
       _performanceProfile = _PerformanceProfile.low;
       await prefs.setString(_prefPerfProfile, _PerformanceProfile.low.key);
+      await prefs.setInt(_prefLastUnstableAtMs, nowMs);
+    } else if (!prefs.containsKey(_prefLastUnstableAtMs)) {
+      await prefs.setInt(_prefLastUnstableAtMs, nowMs);
     }
   }
 
@@ -351,6 +388,8 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
       );
       _registerBaseUrlController.text = _baseUrl;
       await _syncBaseUrlToServerIp();
+      _startAutoProfileRecoveryLoop();
+      unawaited(_maybeAutoRecoverPerformanceProfile(force: true));
 
       if (_baseUrl.isEmpty) {
         setState(() {
@@ -392,6 +431,7 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
     _syncTimer?.cancel();
     _timelineEvalTimer?.cancel();
     _flashOverlayTimer?.cancel();
+    _autoProfileTimer?.cancel();
     _settingsHoldTimer?.cancel();
     _realtimePingTimer?.cancel();
     _realtimeSyncDebounce?.cancel();
@@ -401,6 +441,57 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
     _registerLocationController.dispose();
     _registerBaseUrlController.dispose();
     super.dispose();
+  }
+
+  void _startAutoProfileRecoveryLoop() {
+    _autoProfileTimer?.cancel();
+    _autoProfileTimer = Timer.periodic(const Duration(minutes: 5), (_) {
+      unawaited(_maybeAutoRecoverPerformanceProfile(force: false));
+    });
+  }
+
+  Future<void> _applyRecoveryMode(bool enabled) async {
+    if (_recoveryMode == enabled) return;
+    if (mounted) {
+      setState(() => _recoveryMode = enabled);
+    } else {
+      _recoveryMode = enabled;
+    }
+    _rebuildServices();
+    _restartSyncTimer();
+  }
+
+  Future<void> _maybeAutoRecoverPerformanceProfile({
+    required bool force,
+  }) async {
+    final prefs = await SharedPreferences.getInstance();
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    final lastUnstableMs = prefs.getInt(_prefLastUnstableAtMs) ?? nowMs;
+    final stableMs = nowMs - lastUnstableMs;
+
+    if (_recoveryMode && stableMs >= _autoExitRecoveryAfterMs) {
+      await _applyRecoveryMode(false);
+      if (mounted) {
+        _showSnack('Recovery mode dinonaktifkan otomatis (stabil).');
+      }
+    }
+
+    _PerformanceProfile? target;
+    if (_performanceProfile == _PerformanceProfile.low &&
+        stableMs >= _autoPromoteLowToNormalAfterMs) {
+      target = _PerformanceProfile.normal;
+    } else if (_performanceProfile == _PerformanceProfile.normal &&
+        stableMs >= _autoPromoteNormalToHighAfterMs) {
+      target = _PerformanceProfile.high;
+    }
+
+    if (target == null) return;
+    if (!force && target == _performanceProfile) return;
+
+    await _saveRuntimeProfile(target);
+    if (mounted) {
+      _showSnack('Mode performa otomatis: ${target.label}');
+    }
   }
 
   void _startSettingsHoldTimer() {
@@ -1118,6 +1209,8 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
 
       final syncResult = await _sync.syncMediaDetailed(
         mediaForSync,
+        allowHighTierUpgrades:
+            !_recoveryMode && _performanceProfile != _PerformanceProfile.low,
         onItemProcessed: (done, total, item) {
           final activeDeviceId = _deviceId;
           if (activeDeviceId == null ||
@@ -1131,7 +1224,11 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
               deviceId: activeDeviceId,
               planRevision: planRevision,
               queueStatus: queueStatus,
-              downloadedBytes: syncResultDownloadedBytesHint(done, total, totalBytes),
+              downloadedBytes: syncResultDownloadedBytesHint(
+                done,
+                total,
+                totalBytes,
+              ),
               totalBytes: totalBytes,
               currentMediaId: item.id,
               completedIds: const [],
@@ -1168,9 +1265,15 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
           }
         }
         try {
+          final lowUnion = {
+            ...syncResult.lowReadyIds,
+            ...syncResult.completedIds,
+          }.toList();
           await _api.reportMediaCache(
             deviceId: deviceId,
-            mediaIds: localMap.keys,
+            lowMediaIds: lowUnion,
+            normalMediaIds: syncResult.completedIds,
+            highMediaIds: syncResult.highReadyIds,
           );
         } catch (_) {
           // Keep playback and sync running even if report fails.
@@ -1276,17 +1379,22 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
     return false;
   }
 
-  bool _isPlaylistCacheReady(
+  ({bool ready, int readyCount, int requiredCount, bool strictAll})
+  _playlistCacheGate(
     DeviceConfig cfg,
     Map<String, String> localMap,
     String playlistId,
   ) {
-    if (cfg.playlists.isEmpty) return true;
+    if (cfg.playlists.isEmpty) {
+      return (ready: true, readyCount: 0, requiredCount: 0, strictAll: false);
+    }
     final target = cfg.playlists.firstWhere(
       (playlist) => playlist.id == playlistId,
       orElse: () => cfg.playlists.first,
     );
-    if (target.items.isEmpty) return true;
+    if (target.items.isEmpty) {
+      return (ready: true, readyCount: 0, requiredCount: 0, strictAll: false);
+    }
 
     final mediaById = <String, MediaItem>{for (final m in cfg.media) m.id: m};
     final allowedItems = target.items.where((item) {
@@ -1294,17 +1402,41 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
       if (media == null) return false;
       return _isMediaAllowed(media);
     }).toList();
-    if (allowedItems.isEmpty) return true;
-    final requiredReady = math.min(_precacheGateMinItems, allowedItems.length);
+    if (allowedItems.isEmpty) {
+      return (ready: true, readyCount: 0, requiredCount: 0, strictAll: false);
+    }
+    final isFlashSaleTarget =
+        target.isFlashSale || _isFlashSalePlaylistName(target.name);
+    final requiredReady = isFlashSaleTarget
+        ? allowedItems.length
+        : math.min(
+            allowedItems.length,
+            math.max(
+              _precacheGateNormalMinItems,
+              (allowedItems.length * _precacheGateNormalRatio).ceil(),
+            ),
+          );
     var readyCount = 0;
     for (final item in allowedItems) {
       final local = localMap[item.mediaId];
       if (_localFileExists(local)) {
         readyCount += 1;
-        if (readyCount >= requiredReady) return true;
+        if (readyCount >= requiredReady) {
+          return (
+            ready: true,
+            readyCount: readyCount,
+            requiredCount: requiredReady,
+            strictAll: isFlashSaleTarget,
+          );
+        }
       }
     }
-    return false;
+    return (
+      ready: false,
+      readyCount: readyCount,
+      requiredCount: requiredReady,
+      strictAll: isFlashSaleTarget,
+    );
   }
 
   void _applyConfigToPlayback(
@@ -1411,18 +1543,35 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
     );
     final nextGridPresetA = isFlashSale ? '1x1' : configuredGridPresetA;
     final playlistSwitchNeeded = nextSyncKeyA != _syncKeyA;
-    final cacheReady = !_strictLocalOnlyPlayback
-        ? true
-        : _isPlaylistCacheReady(config, localMap, nextSyncKeyA);
+    final cacheGate = !_strictLocalOnlyPlayback
+        ? (ready: true, readyCount: 0, requiredCount: 0, strictAll: false)
+        : _playlistCacheGate(config, localMap, nextSyncKeyA);
     if (_strictLocalOnlyPlayback &&
         (playlistSwitchNeeded || _itemsA.isEmpty) &&
-        !cacheReady) {
+        !cacheGate.ready) {
       _cacheGatePending = true;
+      final now = DateTime.now();
+      final nextNoticeKey =
+          '$nextSyncKeyA:${cacheGate.readyCount}/${cacheGate.requiredCount}:${cacheGate.strictAll}';
+      final canNotify =
+          _lastCacheGateNoticeKey != nextNoticeKey ||
+          _lastCacheGateNoticeAt == null ||
+          now.difference(_lastCacheGateNoticeAt!).inSeconds >= 12;
+      if (mounted && canNotify) {
+        final modeLabel = cacheGate.strictAll ? 'Flash Sale 100%' : 'Playlist';
+        _showSnack(
+          '$modeLabel menunggu cache ${cacheGate.readyCount}/${cacheGate.requiredCount}',
+        );
+        _lastCacheGateNoticeKey = nextNoticeKey;
+        _lastCacheGateNoticeAt = now;
+      }
       if (setLoadingFalse && mounted && _loading) {
         setState(() => _loading = false);
       }
       return;
     }
+    _lastCacheGateNoticeKey = null;
+    _lastCacheGateNoticeAt = null;
     final gridChanged = nextGridPresetA != _gridPresetA;
     final transitionChanged =
         nextTransitionDurationSecA != _transitionDurationSecA;
@@ -1616,7 +1765,7 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
         config.media
             .map(
               (m) =>
-                  '${m.id}|${m.type}|${m.path}|${m.checksum}|${m.durationSec ?? 0}|${m.sizeBytes ?? 0}',
+                  '${m.id}|${m.type}|${m.displayPath}|${m.thumbPath}|${m.highPath}|${m.checksum}|${m.durationSec ?? 0}|${m.sizeBytes ?? 0}',
             )
             .toList()
           ..sort();
@@ -1701,7 +1850,7 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
         PlaybackItem(
           id: media.id,
           type: media.type,
-          url: _absoluteUrl(media.path),
+          url: _absoluteUrl(media.displayPath),
           durationSec: duration,
           localPath: localPath,
         ),
@@ -2003,8 +2152,8 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
         items: _itemsA,
         syncKey: _syncKeyA,
         transitionDurationSec: _transitionDurationSecA,
-        minImageDecodeWidth: _minDecodeWidth,
-        maxImageDecodeWidth: _maxDecodeWidth,
+        minImageDecodeWidth: _effectiveMinDecodeWidth,
+        maxImageDecodeWidth: _effectiveMaxDecodeWidth,
       );
     }
     return LayoutBuilder(
@@ -2047,8 +2196,8 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
                 items: cellItems,
                 syncKey: '$_syncKeyA-grid-$index',
                 transitionDurationSec: _transitionDurationSecA,
-                minImageDecodeWidth: _minDecodeWidth,
-                maxImageDecodeWidth: _maxDecodeWidth,
+                minImageDecodeWidth: _effectiveMinDecodeWidth,
+                maxImageDecodeWidth: _effectiveMaxDecodeWidth,
               ),
             );
           },
@@ -2165,7 +2314,8 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
         if (name.isEmpty) continue;
         final mediaId = (row['media_id'] ?? '').toString().trim();
         final linkedMedia = mediaById[mediaId];
-        final linkedPath = (linkedMedia?.path ?? '').trim();
+        final linkedPath = (linkedMedia?.thumbPath ?? linkedMedia?.path ?? '')
+            .trim();
         rows.add(
           _BeautyProduct(
             name: name,
@@ -2982,16 +3132,23 @@ class _FlashSaleProductMediaPreview extends StatelessWidget {
     final hasLocalPath = localPath.isNotEmpty;
     final hasLocal = hasLocalPath && File(localPath).existsSync();
     final hasLinkedMedia =
-        product.mediaType.trim().isNotEmpty || product.mediaUrl.trim().isNotEmpty;
+        product.mediaType.trim().isNotEmpty ||
+        product.mediaUrl.trim().isNotEmpty;
     final isImage = product.mediaType == 'image';
     final hasRemotePreview = isImage && product.mediaUrl.trim().isNotEmpty;
     final hasPreview = isImage && (hasLocal || hasRemotePreview);
 
     Widget content;
     if (hasPreview) {
+      final logicalWidth = MediaQuery.sizeOf(context).width;
+      final dpr = MediaQuery.devicePixelRatioOf(context);
+      final previewDecodeWidth = (logicalWidth * dpr).round().clamp(720, 1440);
       final ImageProvider previewProvider = hasLocal
-          ? ResizeImage(FileImage(File(localPath)), width: 360)
-          : ResizeImage(NetworkImage(product.mediaUrl.trim()), width: 360);
+          ? ResizeImage(FileImage(File(localPath)), width: previewDecodeWidth)
+          : ResizeImage(
+              NetworkImage(product.mediaUrl.trim()),
+              width: previewDecodeWidth,
+            );
       content = ClipRRect(
         borderRadius: BorderRadius.circular(10),
         child: Image(
@@ -2999,7 +3156,7 @@ class _FlashSaleProductMediaPreview extends StatelessWidget {
           fit: BoxFit.cover,
           width: double.infinity,
           height: double.infinity,
-          filterQuality: FilterQuality.none,
+          filterQuality: FilterQuality.low,
           errorBuilder: (context, error, stackTrace) =>
               _placeholder('Gagal memuat gambar'),
         ),

@@ -6,13 +6,17 @@ import 'cache.dart';
 
 class SyncRunResult {
   final Map<String, String> localMap;
+  final List<String> lowReadyIds;
   final List<String> completedIds;
+  final List<String> highReadyIds;
   final List<Map<String, dynamic>> failedItems;
   final int downloadedBytes;
 
   const SyncRunResult({
     required this.localMap,
+    required this.lowReadyIds,
     required this.completedIds,
+    required this.highReadyIds,
     required this.failedItems,
     required this.downloadedBytes,
   });
@@ -62,9 +66,12 @@ class SyncService {
   Future<SyncRunResult> syncMediaDetailed(
     List<MediaItem> media, {
     void Function(int done, int total, MediaItem item)? onItemProcessed,
+    bool allowHighTierUpgrades = false,
   }) async {
     final result = <String, String>{};
+    final lowReadyIds = <String>[];
     final completedIds = <String>[];
+    final highReadyIds = <String>[];
     final failedItems = <Map<String, dynamic>>[];
     var downloadedBytes = 0;
     var done = 0;
@@ -74,24 +81,11 @@ class SyncService {
       final size = m.sizeBytes ?? 0;
       final isImage = m.type == 'image';
       final isVideo = m.type == 'video';
-      if (isImage && size > maxImageBytes) {
-        final stale = await cache.getFileForPath(m.path);
-        if (stale.existsSync()) {
-          try {
-            stale.deleteSync();
-          } catch (_) {}
-        }
-        failedItems.add({
-          'media_id': m.id,
-          'error': 'image_too_large',
-          'retry_count': 0,
-        });
-        done += 1;
-        onItemProcessed?.call(done, total, m);
-        continue;
-      }
       if (isVideo && size > maxVideoBytes) {
-        final stale = await cache.getFileForPath(m.path);
+        final targetPath = m.displayPath.trim().isNotEmpty
+            ? m.displayPath
+            : m.path;
+        final stale = await cache.getFileForPath(targetPath);
         if (stale.existsSync()) {
           try {
             stale.deleteSync();
@@ -106,51 +100,125 @@ class SyncService {
         onItemProcessed?.call(done, total, m);
         continue;
       }
-      final file = await cache.getFileForPath(m.path);
-      final hasChecksum = m.checksum.trim().isNotEmpty;
-      final ok = hasChecksum
-          ? await cache.verifyChecksum(file, m.checksum)
-          : file.existsSync();
-      if (!ok) {
-        final url = _absoluteUrl(m.path);
+
+      final lowPath = (m.thumbPath.trim().isNotEmpty ? m.thumbPath : m.path);
+      final normalPath = (m.displayPath.trim().isNotEmpty
+          ? m.displayPath
+          : m.path);
+      final highPath = (m.highPath.trim().isNotEmpty ? m.highPath : normalPath);
+
+      String? bestLocalPath;
+
+      // Stage 1: LOW for fast-first render.
+      final lowFile = await cache.getFileForPath(lowPath);
+      if (!lowFile.existsSync()) {
+        final lowUrl = _absoluteUrl(lowPath);
         try {
-          final res = await _downloadWithRetry(Uri.parse(url));
+          final res = await _downloadWithRetry(Uri.parse(lowUrl));
           if (res.statusCode == 200) {
-            await file.writeAsBytes(res.bodyBytes, flush: true);
-            downloadedBytes += (m.sizeBytes ?? res.bodyBytes.length);
-          } else {
+            await lowFile.writeAsBytes(res.bodyBytes, flush: true);
+            downloadedBytes += res.bodyBytes.length;
+          }
+        } catch (_) {
+          // LOW is best-effort. Continue to NORMAL stage.
+        }
+      }
+      if (lowFile.existsSync()) {
+        bestLocalPath = lowFile.path;
+        if (!lowReadyIds.contains(m.id)) {
+          lowReadyIds.add(m.id);
+        }
+      }
+
+      // Stage 2: NORMAL determines server-ready status.
+      final hasChecksum = m.checksum.trim().isNotEmpty;
+      final normalFile = await cache.getFileForPath(normalPath);
+      final normalAllowed = !isImage || size <= 0 || size <= maxImageBytes;
+      var normalReady = false;
+      if (!normalAllowed) {
+        failedItems.add({
+          'media_id': m.id,
+          'error': 'image_too_large',
+          'retry_count': 0,
+        });
+      } else {
+        normalReady = hasChecksum
+            ? await cache.verifyChecksum(normalFile, m.checksum)
+            : normalFile.existsSync();
+        if (!normalReady) {
+          final normalUrl = _absoluteUrl(normalPath);
+          try {
+            final res = await _downloadWithRetry(Uri.parse(normalUrl));
+            if (res.statusCode == 200) {
+              await normalFile.writeAsBytes(res.bodyBytes, flush: true);
+              downloadedBytes += (m.sizeBytes ?? res.bodyBytes.length);
+            } else {
+              failedItems.add({
+                'media_id': m.id,
+                'error': 'normal_http_${res.statusCode}',
+                'retry_count': 0,
+              });
+            }
+          } catch (error) {
             failedItems.add({
               'media_id': m.id,
-              'error': 'http_${res.statusCode}',
+              'error': 'normal_${error.toString()}',
               'retry_count': 0,
             });
           }
-        } catch (error) {
-          failedItems.add({
-            'media_id': m.id,
-            'error': error.toString(),
-            'retry_count': 0,
-          });
+        }
+        normalReady = hasChecksum
+            ? await cache.verifyChecksum(normalFile, m.checksum)
+            : normalFile.existsSync();
+        if (normalReady && normalFile.existsSync()) {
+          bestLocalPath = normalFile.path;
+          if (!completedIds.contains(m.id)) {
+            completedIds.add(m.id);
+          }
+        } else if (normalFile.existsSync() && hasChecksum) {
+          try {
+            normalFile.deleteSync();
+          } catch (_) {}
+          if (!failedItems.any((row) => row['media_id'] == m.id)) {
+            failedItems.add({
+              'media_id': m.id,
+              'error': 'checksum_invalid_after_download',
+              'retry_count': 0,
+            });
+          }
         }
       }
-      final validAfter = hasChecksum
-          ? await cache.verifyChecksum(file, m.checksum)
-          : file.existsSync();
-      if (validAfter && file.existsSync()) {
-        result[m.id] = file.path;
-        completedIds.add(m.id);
-      } else if (file.existsSync()) {
-        try {
-          file.deleteSync();
-        } catch (_) {}
-        if (!failedItems.any((row) => row['media_id'] == m.id)) {
-          failedItems.add({
-            'media_id': m.id,
-            'error': 'checksum_invalid_after_download',
-            'retry_count': 0,
-          });
+
+      // Stage 3: HIGH quality opportunistic upgrade.
+      if (allowHighTierUpgrades &&
+          isImage &&
+          normalReady &&
+          highPath.trim() != normalPath.trim()) {
+        final highFile = await cache.getFileForPath(highPath);
+        if (!highFile.existsSync()) {
+          final highUrl = _absoluteUrl(highPath);
+          try {
+            final res = await _downloadWithRetry(Uri.parse(highUrl));
+            if (res.statusCode == 200) {
+              await highFile.writeAsBytes(res.bodyBytes, flush: true);
+              downloadedBytes += res.bodyBytes.length;
+            }
+          } catch (_) {
+            // HIGH is optional; ignore failures.
+          }
+        }
+        if (highFile.existsSync()) {
+          bestLocalPath = highFile.path;
+          if (!highReadyIds.contains(m.id)) {
+            highReadyIds.add(m.id);
+          }
         }
       }
+
+      if (bestLocalPath != null && bestLocalPath.trim().isNotEmpty) {
+        result[m.id] = bestLocalPath;
+      }
+
       done += 1;
       onItemProcessed?.call(done, total, m);
     }
@@ -158,7 +226,9 @@ class SyncService {
     await cache.cleanupCache(maxCacheBytes);
     return SyncRunResult(
       localMap: result,
+      lowReadyIds: lowReadyIds,
       completedIds: completedIds,
+      highReadyIds: highReadyIds,
       failedItems: failedItems,
       downloadedBytes: downloadedBytes,
     );

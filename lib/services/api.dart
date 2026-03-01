@@ -79,10 +79,14 @@ class ApiService {
     final data = jsonDecode(res.body);
 
     final media = (data['media'] as List).map((m) {
+      final path = (m['path'] ?? '').toString();
       return MediaItem(
         id: m['id'],
         type: m['type'],
-        path: m['path'],
+        path: path,
+        displayPath: (m['display_path'] ?? path).toString(),
+        thumbPath: (m['thumb_path'] ?? path).toString(),
+        highPath: (m['high_path'] ?? m['display_path'] ?? path).toString(),
         checksum: m['checksum'],
         durationSec: m['duration_sec'],
         sizeBytes: (m['size'] as num?)?.toInt(),
@@ -174,19 +178,40 @@ class ApiService {
 
   Future<void> reportMediaCache({
     required String deviceId,
-    required Iterable<String> mediaIds,
+    required Iterable<String> normalMediaIds,
+    Iterable<String>? lowMediaIds,
+    Iterable<String>? highMediaIds,
   }) async {
-    final normalized = mediaIds
-        .map((id) => id.trim())
-        .where((id) => id.isNotEmpty)
-        .toSet()
-        .toList()
-      ..sort();
+    final normalizedNormal =
+        normalMediaIds
+            .map((id) => id.trim())
+            .where((id) => id.isNotEmpty)
+            .toSet()
+            .toList()
+          ..sort();
+    final normalizedLow =
+        (lowMediaIds ?? normalMediaIds)
+            .map((id) => id.trim())
+            .where((id) => id.isNotEmpty)
+            .toSet()
+            .toList()
+          ..sort();
+    final normalizedHigh =
+        (highMediaIds ?? const <String>[])
+            .map((id) => id.trim())
+            .where((id) => id.isNotEmpty)
+            .toSet()
+            .toList()
+          ..sort();
     final res = await _sendWithRetry(
       () => http.post(
         _uri('/devices/$deviceId/media-cache-report'),
         headers: {'Content-Type': 'application/json'},
-        body: jsonEncode(normalized),
+        body: jsonEncode({
+          'low_ids': normalizedLow,
+          'normal_ids': normalizedNormal,
+          'high_ids': normalizedHigh,
+        }),
       ),
     );
     if (res.statusCode != 200) {
@@ -227,10 +252,7 @@ class ApiService {
     if (etaSec != null && etaSec >= 0) {
       query['eta_sec'] = '$etaSec';
     }
-    final body = {
-      'completed_ids': completedIds,
-      'failed_items': failedItems,
-    };
+    final body = {'completed_ids': completedIds, 'failed_items': failedItems};
     final res = await _sendWithRetry(
       () => http.post(
         _uri('/devices/$deviceId/sync-progress', query),

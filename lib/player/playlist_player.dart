@@ -400,9 +400,14 @@ class _PlaylistPlayerState extends State<PlaylistPlayer> {
           ),
         );
       } else {
-        final logicalWidth = MediaQuery.sizeOf(context).width;
+        final logicalSize = MediaQuery.sizeOf(context);
+        final logicalWidth = logicalSize.width;
+        final logicalHeight = logicalSize.height;
         final dpr = MediaQuery.devicePixelRatioOf(context);
-        final requestedDecodeWidth = (logicalWidth * dpr).round().clamp(
+        final targetLogicalWidth = logicalWidth > logicalHeight
+            ? logicalWidth
+            : logicalHeight;
+        final requestedDecodeWidth = (targetLogicalWidth * dpr).round().clamp(
           widget.minImageDecodeWidth,
           widget.maxImageDecodeWidth,
         );
@@ -412,7 +417,7 @@ class _PlaylistPlayerState extends State<PlaylistPlayer> {
             child: Image.file(
               File(local),
               cacheWidth: requestedDecodeWidth,
-              filterQuality: FilterQuality.none,
+              filterQuality: FilterQuality.low,
               errorBuilder: (context, error, stackTrace) {
                 return const SizedBox(
                   width: 420,

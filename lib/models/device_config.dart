@@ -2,6 +2,9 @@ class MediaItem {
   final String id;
   final String type; // image | video
   final String path;
+  final String displayPath;
+  final String thumbPath;
+  final String highPath;
   final String checksum;
   final int? durationSec;
   final int? sizeBytes;
@@ -10,10 +13,17 @@ class MediaItem {
     required this.id,
     required this.type,
     required this.path,
+    String? displayPath,
+    String? thumbPath,
+    String? highPath,
     required this.checksum,
     this.durationSec,
     this.sizeBytes,
-  });
+  }) : displayPath = (displayPath == null || displayPath == '')
+           ? path
+           : displayPath,
+       thumbPath = (thumbPath == null || thumbPath == '') ? path : thumbPath,
+       highPath = (highPath == null || highPath == '') ? path : highPath;
 }
 
 class PlaylistItemConfig {
