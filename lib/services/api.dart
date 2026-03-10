@@ -139,6 +139,14 @@ class ApiService {
     final orientation = data['device'] != null
         ? data['device']['orientation'] as String?
         : null;
+    final mediaQualityTierRaw = data['device'] != null
+        ? data['device']['media_quality_tier']?.toString()
+        : null;
+    final mediaQualityTier = switch ((mediaQualityTierRaw ?? '').trim().toLowerCase()) {
+      'low' => 'low',
+      'high' => 'high',
+      _ => 'normal',
+    };
     final flashSaleRaw = data['flash_sale'];
     final flashSale = (flashSaleRaw is Map)
         ? FlashSaleConfig(
@@ -164,6 +172,7 @@ class ApiService {
       screens: screens,
       flashSale: flashSale,
       orientation: orientation,
+      mediaQualityTier: mediaQualityTier,
     );
   }
 

@@ -66,8 +66,15 @@ class SyncService {
   Future<SyncRunResult> syncMediaDetailed(
     List<MediaItem> media, {
     void Function(int done, int total, MediaItem item)? onItemProcessed,
-    bool allowHighTierUpgrades = false,
+    String targetTier = 'normal',
   }) async {
+    final normalizedTier = switch (targetTier.trim().toLowerCase()) {
+      'low' => 'low',
+      'high' => 'high',
+      _ => 'normal',
+    };
+    final allowNormalTier = normalizedTier != 'low';
+    final allowHighTierUpgrades = normalizedTier == 'high';
     final result = <String, String>{};
     final lowReadyIds = <String>[];
     final completedIds = <String>[];
@@ -131,58 +138,76 @@ class SyncService {
       }
 
       // Stage 2: NORMAL determines server-ready status.
-      final hasChecksum = m.checksum.trim().isNotEmpty;
-      final normalFile = await cache.getFileForPath(normalPath);
-      final normalAllowed = !isImage || size <= 0 || size <= maxImageBytes;
       var normalReady = false;
-      if (!normalAllowed) {
-        failedItems.add({
-          'media_id': m.id,
-          'error': 'image_too_large',
-          'retry_count': 0,
-        });
-      } else {
-        normalReady = hasChecksum
-            ? await cache.verifyChecksum(normalFile, m.checksum)
-            : normalFile.existsSync();
-        if (!normalReady) {
-          final normalUrl = _absoluteUrl(normalPath);
-          try {
-            final res = await _downloadWithRetry(Uri.parse(normalUrl));
-            if (res.statusCode == 200) {
-              await normalFile.writeAsBytes(res.bodyBytes, flush: true);
-              downloadedBytes += (m.sizeBytes ?? res.bodyBytes.length);
-            } else {
+      if (allowNormalTier) {
+        final hasChecksum = m.checksum.trim().isNotEmpty;
+        final normalFile = await cache.getFileForPath(normalPath);
+        final normalAllowed = !isImage || size <= 0 || size <= maxImageBytes;
+        if (!normalAllowed) {
+          failedItems.add({
+            'media_id': m.id,
+            'error': 'image_too_large',
+            'retry_count': 0,
+          });
+        } else {
+          normalReady = hasChecksum
+              ? await cache.verifyChecksum(normalFile, m.checksum)
+              : normalFile.existsSync();
+          if (!normalReady) {
+            final normalUrl = _absoluteUrl(normalPath);
+            try {
+              final res = await _downloadWithRetry(Uri.parse(normalUrl));
+              if (res.statusCode == 200) {
+                await normalFile.writeAsBytes(res.bodyBytes, flush: true);
+                downloadedBytes += (m.sizeBytes ?? res.bodyBytes.length);
+              } else {
+                failedItems.add({
+                  'media_id': m.id,
+                  'error': 'normal_http_${res.statusCode}',
+                  'retry_count': 0,
+                });
+              }
+            } catch (error) {
               failedItems.add({
                 'media_id': m.id,
-                'error': 'normal_http_${res.statusCode}',
+                'error': 'normal_${error.toString()}',
                 'retry_count': 0,
               });
             }
-          } catch (error) {
-            failedItems.add({
-              'media_id': m.id,
-              'error': 'normal_${error.toString()}',
-              'retry_count': 0,
-            });
+          }
+          normalReady = hasChecksum
+              ? await cache.verifyChecksum(normalFile, m.checksum)
+              : normalFile.existsSync();
+          if (normalReady && normalFile.existsSync()) {
+            bestLocalPath = normalFile.path;
+            if (!completedIds.contains(m.id)) {
+              completedIds.add(m.id);
+            }
+          } else if (normalFile.existsSync() && hasChecksum) {
+            try {
+              normalFile.deleteSync();
+            } catch (_) {}
+            if (!failedItems.any((row) => row['media_id'] == m.id)) {
+              failedItems.add({
+                'media_id': m.id,
+                'error': 'checksum_invalid_after_download',
+                'retry_count': 0,
+              });
+            }
           }
         }
-        normalReady = hasChecksum
-            ? await cache.verifyChecksum(normalFile, m.checksum)
-            : normalFile.existsSync();
-        if (normalReady && normalFile.existsSync()) {
-          bestLocalPath = normalFile.path;
+      } else {
+        // LOW target: keep playback fast from thumb path only.
+        if (bestLocalPath != null && bestLocalPath.trim().isNotEmpty) {
+          normalReady = true;
           if (!completedIds.contains(m.id)) {
             completedIds.add(m.id);
           }
-        } else if (normalFile.existsSync() && hasChecksum) {
-          try {
-            normalFile.deleteSync();
-          } catch (_) {}
+        } else {
           if (!failedItems.any((row) => row['media_id'] == m.id)) {
             failedItems.add({
               'media_id': m.id,
-              'error': 'checksum_invalid_after_download',
+              'error': 'low_not_ready',
               'retry_count': 0,
             });
           }

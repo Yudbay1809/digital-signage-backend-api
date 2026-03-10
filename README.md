@@ -13,7 +13,11 @@ This app is designed for unattended screens with playlist sync, local caching, a
 - Verified end-to-end against backend final contract (`/devices/{id}/config`, websocket refresh flow).
 - Player works with normalized media URL path from backend (`/storage/media/<file>`).
 
-## Latest Updates (2026-02-17)
+## Latest Updates (2026-03-11)
+- Auto Downgrade Guard: jika FPS drop/crash/sync error berulang, profil otomatis turun ke `low` dan dikunci sementara (cocok untuk device RAM 2GB).
+- Cache Readiness Gate: jangan switch playlist sebelum cache siap; jika pending terlalu lama, profil diturunkan untuk stabilitas.
+- Stability Score + Cooldown: auto-promote dinonaktifkan sementara saat stabilitas rendah.
+- Max Performance Profile: batas maksimum agar device tidak auto-upgrade ke `high`.
 - Device now reports local cached media IDs to backend after sync (`/devices/{id}/media-cache-report`).
 - This enables CMS to verify whether each device has completed media download.
 - Existing playback optimizations (prewarm, cache-ready switch, light image transition) remain active.

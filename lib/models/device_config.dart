@@ -99,6 +99,7 @@ class ScreenConfig {
 class DeviceConfig {
   final String deviceId;
   final String? orientation;
+  final String mediaQualityTier;
   final List<MediaItem> media;
   final List<PlaylistConfig> playlists;
   final List<ScreenConfig> screens;
@@ -111,6 +112,7 @@ class DeviceConfig {
     required this.screens,
     this.flashSale,
     this.orientation,
+    this.mediaQualityTier = 'normal',
   });
 }
 

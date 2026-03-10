@@ -31,6 +31,12 @@ extension on _PerformanceProfile {
     _PerformanceProfile.normal => 'Normal',
     _PerformanceProfile.high => 'High',
   };
+
+  int get rank => switch (this) {
+    _PerformanceProfile.low => 0,
+    _PerformanceProfile.normal => 1,
+    _PerformanceProfile.high => 2,
+  };
 }
 
 void main() {
@@ -129,6 +135,11 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
   static const int _precacheGateNormalMinItems = 2;
   static const double _precacheGateNormalRatio = 0.7;
   static const String _prefPerfProfile = 'performance_profile';
+  static const String _prefPerfProfileMax = 'performance_profile_max';
+  static const String _prefPerfProfileLockUntilMs =
+      'performance_profile_lock_until_ms';
+  static const String _prefAutoPromoteCooldownUntilMs =
+      'auto_promote_cooldown_until_ms';
   static const String _prefSessionActive = 'session_active';
   static const String _prefSessionStartMs = 'session_start_ms';
   static const String _prefCrashStreak = 'crash_streak';
@@ -139,6 +150,13 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
   static const int _autoExitRecoveryAfterMs = 10 * 60 * 1000;
   static const int _autoPromoteLowToNormalAfterMs = 30 * 60 * 1000;
   static const int _autoPromoteNormalToHighAfterMs = 6 * 60 * 60 * 1000;
+  static const int _autoDowngradeLockHours = 6;
+  static const int _autoDowngradeLockMs = _autoDowngradeLockHours * 60 * 60 * 1000;
+  static const int _cacheGateDowngradeAfterMs = 2 * 60 * 1000;
+  static const int _syncFailureWindowMs = 5 * 60 * 1000;
+  static const int _syncFailureThreshold = 3;
+  static const int _autoPromoteCooldownMs = 2 * 60 * 60 * 1000;
+  static const int _stabilityScoreLowThreshold = 70;
   static const int _minImageBytesLow = 6 * 1024 * 1024;
   static const int _minImageBytesNormal = 12 * 1024 * 1024;
   static const int _minImageBytesHigh = 20 * 1024 * 1024;
@@ -200,8 +218,14 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
   bool _cacheGatePending = false;
   String? _lastCacheGateNoticeKey;
   DateTime? _lastCacheGateNoticeAt;
+  int? _cacheGatePendingSinceMs;
+  int _syncFailureStreak = 0;
+  int? _lastSyncFailureAtMs;
   bool _recoveryMode = false;
   _PerformanceProfile _performanceProfile = _PerformanceProfile.normal;
+  _PerformanceProfile _maxPerformanceProfile = _PerformanceProfile.normal;
+  int _autoDowngradeLockUntilMs = 0;
+  int _autoPromoteCooldownUntilMs = 0;
   DeviceConfig? _cachedConfig;
   Map<String, String> _cachedLocalMap = const {};
   final ValueNotifier<int> _flashOverlayTick = ValueNotifier<int>(0);
@@ -214,8 +238,14 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
     _init();
   }
 
+  _PerformanceProfile get _effectivePerformanceProfile {
+    return _performanceProfile.rank > _maxPerformanceProfile.rank
+        ? _maxPerformanceProfile
+        : _performanceProfile;
+  }
+
   int get _maxImageBytes {
-    return switch (_performanceProfile) {
+    return switch (_effectivePerformanceProfile) {
       _PerformanceProfile.low => _minImageBytesLow,
       _PerformanceProfile.normal => _minImageBytesNormal,
       _PerformanceProfile.high => _minImageBytesHigh,
@@ -223,7 +253,7 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
   }
 
   int get _maxVideoBytes {
-    return switch (_performanceProfile) {
+    return switch (_effectivePerformanceProfile) {
       _PerformanceProfile.low => _minVideoBytesLow,
       _PerformanceProfile.normal => _minVideoBytesNormal,
       _PerformanceProfile.high => _minVideoBytesHigh,
@@ -232,7 +262,7 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
 
   int get _maxCacheBytes {
     if (_recoveryMode) return 512 * 1024 * 1024;
-    return switch (_performanceProfile) {
+    return switch (_effectivePerformanceProfile) {
       _PerformanceProfile.low => 768 * 1024 * 1024,
       _PerformanceProfile.normal => 1536 * 1024 * 1024,
       _PerformanceProfile.high => 4 * 1024 * 1024 * 1024,
@@ -241,7 +271,7 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
 
   int get _minDecodeWidth {
     if (_recoveryMode) return 360;
-    return switch (_performanceProfile) {
+    return switch (_effectivePerformanceProfile) {
       _PerformanceProfile.low => 360,
       _PerformanceProfile.normal => 480,
       _PerformanceProfile.high => 640,
@@ -250,7 +280,7 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
 
   int get _maxDecodeWidth {
     if (_recoveryMode) return 640;
-    return switch (_performanceProfile) {
+    return switch (_effectivePerformanceProfile) {
       _PerformanceProfile.low => 960,
       _PerformanceProfile.normal => 1280,
       _PerformanceProfile.high => 1920,
@@ -275,7 +305,7 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
 
   Duration get _configPollInterval {
     if (_recoveryMode) return const Duration(seconds: 12);
-    return _performanceProfile == _PerformanceProfile.low
+    return _effectivePerformanceProfile == _PerformanceProfile.low
         ? const Duration(seconds: 10)
         : const Duration(seconds: 8);
   }
@@ -283,6 +313,20 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
   Duration get _realtimeSafetyPollInterval {
     if (_recoveryMode) return const Duration(seconds: 14);
     return const Duration(seconds: 10);
+  }
+
+  int _calculateStabilityScore(int nowMs) {
+    var score = 100;
+    if (_recoveryMode) score -= 30;
+    score -= _syncFailureStreak * 20;
+    final pendingSince = _cacheGatePendingSinceMs;
+    if (pendingSince != null && nowMs > pendingSince) {
+      final minutes = ((nowMs - pendingSince) / 60000).floor();
+      score -= math.min(40, minutes * 10);
+    }
+    if (score < 0) score = 0;
+    if (score > 100) score = 100;
+    return score;
   }
 
   @override
@@ -306,24 +350,82 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
     };
   }
 
+  String _normalizeQualityTier(String? raw) {
+    return switch ((raw ?? '').trim().toLowerCase()) {
+      'low' => 'low',
+      'high' => 'high',
+      _ => 'normal',
+    };
+  }
+
   Future<void> _loadRuntimeProfile() async {
     final prefs = await SharedPreferences.getInstance();
     final profile = _parsePerformanceProfile(prefs.getString(_prefPerfProfile));
+    final maxProfile =
+        _parsePerformanceProfile(prefs.getString(_prefPerfProfileMax));
+    final lockUntil = prefs.getInt(_prefPerfProfileLockUntilMs) ?? 0;
+    final cooldownUntil = prefs.getInt(_prefAutoPromoteCooldownUntilMs) ?? 0;
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    final locked = lockUntil > nowMs;
+    final capped = profile.rank > maxProfile.rank ? maxProfile : profile;
+    final effective = locked ? _PerformanceProfile.low : capped;
     if (mounted) {
-      setState(() => _performanceProfile = profile);
+      setState(() {
+        _performanceProfile = effective;
+        _maxPerformanceProfile = maxProfile;
+        _autoDowngradeLockUntilMs = lockUntil;
+        _autoPromoteCooldownUntilMs = cooldownUntil;
+      });
     } else {
-      _performanceProfile = profile;
+      _performanceProfile = effective;
+      _maxPerformanceProfile = maxProfile;
+      _autoDowngradeLockUntilMs = lockUntil;
+      _autoPromoteCooldownUntilMs = cooldownUntil;
     }
   }
 
   Future<void> _saveRuntimeProfile(_PerformanceProfile profile) async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_prefPerfProfile, profile.key);
+    final lockUntil = prefs.getInt(_prefPerfProfileLockUntilMs) ?? 0;
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    final locked = lockUntil > nowMs;
+    final effective =
+        profile.rank > _maxPerformanceProfile.rank ? _maxPerformanceProfile : profile;
+    final finalProfile = locked ? _PerformanceProfile.low : effective;
+    await prefs.setString(_prefPerfProfile, finalProfile.key);
     if (!mounted) {
-      _performanceProfile = profile;
+      _performanceProfile = finalProfile;
+      _autoDowngradeLockUntilMs = lockUntil;
       return;
     }
-    setState(() => _performanceProfile = profile);
+    setState(() {
+      _performanceProfile = finalProfile;
+      _autoDowngradeLockUntilMs = lockUntil;
+    });
+    _rebuildServices();
+    _restartSyncTimer();
+  }
+
+  Future<void> _saveMaxPerformanceProfile(_PerformanceProfile profile) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_prefPerfProfileMax, profile.key);
+    final lockUntil = prefs.getInt(_prefPerfProfileLockUntilMs) ?? 0;
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    final locked = lockUntil > nowMs;
+    final effective = locked
+        ? _PerformanceProfile.low
+        : (_performanceProfile.rank > profile.rank ? profile : _performanceProfile);
+    if (!mounted) {
+      _maxPerformanceProfile = profile;
+      _performanceProfile = effective;
+      _autoDowngradeLockUntilMs = lockUntil;
+      return;
+    }
+    setState(() {
+      _maxPerformanceProfile = profile;
+      _performanceProfile = effective;
+      _autoDowngradeLockUntilMs = lockUntil;
+    });
     _rebuildServices();
     _restartSyncTimer();
   }
@@ -461,6 +563,29 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
     _restartSyncTimer();
   }
 
+  Future<void> _applyAutoDowngradeLock({
+    required String reason,
+  }) async {
+    final prefs = await SharedPreferences.getInstance();
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    final lockUntil = nowMs + _autoDowngradeLockMs;
+    await prefs.setInt(_prefPerfProfileLockUntilMs, lockUntil);
+    final cooldownUntil = nowMs + _autoPromoteCooldownMs;
+    await prefs.setInt(_prefAutoPromoteCooldownUntilMs, cooldownUntil);
+    await prefs.setInt(_prefLastUnstableAtMs, nowMs);
+    _autoDowngradeLockUntilMs = lockUntil;
+    _autoPromoteCooldownUntilMs = cooldownUntil;
+    _recoveryMode = false;
+    _performanceProfile = _PerformanceProfile.low;
+    await prefs.setString(_prefPerfProfile, _PerformanceProfile.low.key);
+    if (mounted) {
+      setState(() {});
+      _showSnack('Auto Downgrade: Low ($reason)');
+    }
+    _rebuildServices();
+    _restartSyncTimer();
+  }
+
   Future<void> _maybeAutoRecoverPerformanceProfile({
     required bool force,
   }) async {
@@ -468,6 +593,28 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
     final nowMs = DateTime.now().millisecondsSinceEpoch;
     final lastUnstableMs = prefs.getInt(_prefLastUnstableAtMs) ?? nowMs;
     final stableMs = nowMs - lastUnstableMs;
+    final lockUntil = prefs.getInt(_prefPerfProfileLockUntilMs) ?? 0;
+    _autoDowngradeLockUntilMs = lockUntil;
+    if (lockUntil > nowMs) {
+      return;
+    }
+    final cooldownUntil = prefs.getInt(_prefAutoPromoteCooldownUntilMs) ?? 0;
+    _autoPromoteCooldownUntilMs = cooldownUntil;
+
+    final stabilityScore = _calculateStabilityScore(nowMs);
+    if (stabilityScore < _stabilityScoreLowThreshold &&
+        cooldownUntil <= nowMs) {
+      final nextCooldown = nowMs + _autoPromoteCooldownMs;
+      await prefs.setInt(_prefAutoPromoteCooldownUntilMs, nextCooldown);
+      _autoPromoteCooldownUntilMs = nextCooldown;
+      if (mounted) {
+        _showSnack('Auto-promote ditunda (stabilitas rendah).');
+      }
+      return;
+    }
+    if (cooldownUntil > nowMs) {
+      return;
+    }
 
     if (_recoveryMode && stableMs >= _autoExitRecoveryAfterMs) {
       await _applyRecoveryMode(false);
@@ -486,6 +633,9 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
     }
 
     if (target == null) return;
+    if (target.rank > _maxPerformanceProfile.rank) {
+      target = _maxPerformanceProfile;
+    }
     if (!force && target == _performanceProfile) return;
 
     await _saveRuntimeProfile(target);
@@ -869,6 +1019,7 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
     final locationController = TextEditingController(text: _deviceLocation);
     final baseUrlController = TextEditingController(text: _baseUrl);
     var selectedProfile = _performanceProfile;
+    var selectedMaxProfile = _maxPerformanceProfile;
 
     await showDialog<void>(
       context: context,
@@ -919,6 +1070,63 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
                       onChanged: (value) {
                         if (value == null) return;
                         setLocalState(() => selectedProfile = value);
+                      },
+                    ),
+                    const SizedBox(height: 8),
+                    DropdownButtonFormField<_PerformanceProfile>(
+                      initialValue: selectedMaxProfile,
+                      decoration: const InputDecoration(
+                        labelText: 'Batas Maks Performa (Auto)',
+                        helperText:
+                            'Batasi agar auto-switch tidak naik melebihi batas ini.',
+                      ),
+                      items: _PerformanceProfile.values
+                          .map(
+                            (profile) => DropdownMenuItem<_PerformanceProfile>(
+                              value: profile,
+                              child: Text(profile.label),
+                            ),
+                          )
+                          .toList(),
+                      onChanged: (value) {
+                        if (value == null) return;
+                        setLocalState(() => selectedMaxProfile = value);
+                      },
+                    ),
+                    if (_autoDowngradeLockUntilMs >
+                        DateTime.now().millisecondsSinceEpoch)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 6),
+                        child: Builder(
+                          builder: (context) {
+                            final lockText = DateTime
+                                .fromMillisecondsSinceEpoch(_autoDowngradeLockUntilMs)
+                                .toLocal()
+                                .toString();
+                            return Text(
+                              'Auto Downgrade Lock aktif hingga $lockText',
+                              style: const TextStyle(fontSize: 12),
+                            );
+                          },
+                        ),
+                      ),
+                    Builder(
+                      builder: (context) {
+                        final score = _calculateStabilityScore(
+                          DateTime.now().millisecondsSinceEpoch,
+                        );
+                        final cooldownUntil = _autoPromoteCooldownUntilMs;
+                        final cooldownActive =
+                            cooldownUntil > DateTime.now().millisecondsSinceEpoch;
+                        return Padding(
+                          padding: const EdgeInsets.only(top: 6),
+                          child: Text(
+                            cooldownActive
+                                ? 'Stability Score: $score (auto-promote ditunda)'
+                                : 'Stability Score: $score',
+                            style: const TextStyle(fontSize: 12),
+                          ),
+                        );
                       },
                     ),
                     const SizedBox(height: 8),
@@ -981,6 +1189,7 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
                       await prefs.setString('device_name', _deviceName);
                       await prefs.setString('device_location', _deviceLocation);
                       await prefs.setString('base_url', _baseUrl);
+                      await _saveMaxPerformanceProfile(selectedMaxProfile);
                       await _saveRuntimeProfile(selectedProfile);
                       _rebuildServices();
 
@@ -1209,8 +1418,15 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
 
       final syncResult = await _sync.syncMediaDetailed(
         mediaForSync,
-        allowHighTierUpgrades:
-            !_recoveryMode && _performanceProfile != _PerformanceProfile.low,
+        targetTier: (() {
+          var tier = _normalizeQualityTier(config.mediaQualityTier);
+          if (_recoveryMode) tier = 'low';
+          if (_effectivePerformanceProfile == _PerformanceProfile.low &&
+              tier == 'high') {
+            tier = 'normal';
+          }
+          return tier;
+        })(),
         onItemProcessed: (done, total, item) {
           final activeDeviceId = _deviceId;
           if (activeDeviceId == null ||
@@ -1239,6 +1455,8 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
       );
 
       final localMap = syncResult.localMap;
+      _syncFailureStreak = 0;
+      _lastSyncFailureAtMs = null;
       if (deviceId != null && deviceId.isNotEmpty) {
         if (planRevision.isNotEmpty) {
           final nextStatus = syncResult.failedItems.isEmpty
@@ -1269,10 +1487,21 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
             ...syncResult.lowReadyIds,
             ...syncResult.completedIds,
           }.toList();
+          final effectiveTier = (() {
+            var tier = _normalizeQualityTier(config.mediaQualityTier);
+            if (_recoveryMode) tier = 'low';
+            if (_effectivePerformanceProfile == _PerformanceProfile.low &&
+                tier == 'high') {
+              tier = 'normal';
+            }
+            return tier;
+          })();
           await _api.reportMediaCache(
             deviceId: deviceId,
             lowMediaIds: lowUnion,
-            normalMediaIds: syncResult.completedIds,
+            normalMediaIds: effectiveTier == 'low'
+                ? const <String>[]
+                : syncResult.completedIds,
             highMediaIds: syncResult.highReadyIds,
           );
         } catch (_) {
@@ -1292,6 +1521,20 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
         );
       }
     } catch (_) {
+      final nowMs = DateTime.now().millisecondsSinceEpoch;
+      final lastFailure = _lastSyncFailureAtMs ?? 0;
+      if (nowMs - lastFailure > _syncFailureWindowMs) {
+        _syncFailureStreak = 0;
+      }
+      _syncFailureStreak += 1;
+      _lastSyncFailureAtMs = nowMs;
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setInt(_prefLastUnstableAtMs, nowMs);
+      if (_syncFailureStreak >= _syncFailureThreshold &&
+          _autoDowngradeLockUntilMs <= nowMs) {
+        await _applyAutoDowngradeLock(reason: 'sync error');
+        _syncFailureStreak = 0;
+      }
       // Keep playback running via remote URL; retry on next sync cycle.
     } finally {
       _mediaSyncInProgress = false;
@@ -1550,6 +1793,13 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
         (playlistSwitchNeeded || _itemsA.isEmpty) &&
         !cacheGate.ready) {
       _cacheGatePending = true;
+      final nowMs = DateTime.now().millisecondsSinceEpoch;
+      _cacheGatePendingSinceMs ??= nowMs;
+      if (_autoDowngradeLockUntilMs <= nowMs &&
+          nowMs - _cacheGatePendingSinceMs! >= _cacheGateDowngradeAfterMs) {
+        unawaited(_applyAutoDowngradeLock(reason: 'cache gate'));
+        _cacheGatePendingSinceMs = nowMs;
+      }
       final now = DateTime.now();
       final nextNoticeKey =
           '$nextSyncKeyA:${cacheGate.readyCount}/${cacheGate.requiredCount}:${cacheGate.strictAll}';
@@ -1572,6 +1822,7 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
     }
     _lastCacheGateNoticeKey = null;
     _lastCacheGateNoticeAt = null;
+    _cacheGatePendingSinceMs = null;
     final gridChanged = nextGridPresetA != _gridPresetA;
     final transitionChanged =
         nextTransitionDurationSecA != _transitionDurationSecA;
