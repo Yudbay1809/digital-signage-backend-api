@@ -6,10 +6,11 @@ import '../models/device_config.dart';
 
 class ApiService {
   final String baseUrl;
-  static const Duration _timeout = Duration(seconds: 8);
+  static const Duration _timeout = Duration(seconds: 20);
   static const List<Duration> _retryDelays = [
-    Duration(milliseconds: 350),
-    Duration(milliseconds: 900),
+    Duration(milliseconds: 500),
+    Duration(milliseconds: 1200),
+    Duration(milliseconds: 2500),
   ];
 
   ApiService(this.baseUrl);

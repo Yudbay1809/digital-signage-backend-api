@@ -38,7 +38,7 @@ class SyncService {
   });
 
   Future<http.Response> _downloadWithRetry(Uri uri) async {
-    const timeout = Duration(seconds: 12);
+    const timeout = Duration(seconds: 20);
     const delays = [Duration(milliseconds: 500), Duration(milliseconds: 1200)];
     Object? lastError;
     for (var attempt = 0; attempt <= delays.length; attempt++) {
